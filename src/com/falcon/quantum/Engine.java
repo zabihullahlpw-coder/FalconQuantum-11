@@ -23,6 +23,10 @@ public final class Engine {
         public double price;
         public double longScore, shortScore;
         public String side = "LONG";
+        /** Original strategy decision, before optional entry-direction inversion. */
+        public String signalSide;
+        /** Set once when the finalized plan was inverted; prevents accidental double inversion. */
+        public boolean directionReversed;
         public String status = "WAIT";
         public double score;
         public boolean ready;

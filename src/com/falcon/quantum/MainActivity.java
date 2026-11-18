@@ -404,7 +404,9 @@ public class MainActivity extends Activity {
             final Engine.Row r = lastRows.get(i);
             LinearLayout row = card();
             String gradeTag = "A".equals(r.grade) ? "  [A]" : ("B".equals(r.grade) ? "  [B]" : "");
-            row.addView(text(r.symbol + "   " + r.side + "   " + r.score + "%   " + r.status
+            row.addView(text(r.symbol + "   " + r.side
+                    + (r.directionReversed ? " (from " + r.signalSide + ")" : "")
+                    + "   " + r.score + "%   " + r.status
                     + gradeTag, 15,
                     "READY".equals(r.status) ? 0xFF3EE7AB
                             : "NEAR ENTRY".equals(r.status) ? AMBER : TEXT));
@@ -669,7 +671,8 @@ public class MainActivity extends Activity {
             openNow(r);
             return;
         }
-        String detail = r.symbol + "  " + r.side + "\n"
+        String detail = r.symbol + "  " + r.side
+                + (r.directionReversed ? " (reversed from " + r.signalSide + ")" : "") + "\n"
                 + cfg.describe() + "\n"
                 + "entry " + fmt(r.entry) + "\nstop " + fmt(r.stop) + "\ntarget " + fmt(r.target);
         if ("LIVE".equals(env)) {
@@ -1492,6 +1495,21 @@ public class MainActivity extends Activity {
                     + String.format("%.1f", 100.0 / cfg.leverage) + "% adverse move.", 12, AMBER));
         }
 
+        content.addView(text("Reverse Trade Direction (experimental)", 13, ACCENT));
+        content.addView(toggle("Reverse Trade Direction — LONG to SHORT / SHORT to LONG",
+                cfg.reverseTradeDirection, new OnToggle() {
+                    public void set(boolean on) {
+                        cfg.reverseTradeDirection = on;
+                        cfg.save(MainActivity.this);
+                        lastRows.clear(); // old signals must never be entered with changed settings
+                        show("MARKET");
+                    }
+                }));
+        content.addView(text("OFF by default. Applies ONLY to newly finalized FUTURES entries "
+                + "in " + env + "; preserves the original risk/target distances with "
+                + "opposite stop-loss and take-profit. SPOT entries are blocked while "
+                + "reverse is enabled. Does not reverse exits or existing positions. "
+                + "This may increase losses; test in PAPER first.", 11, AMBER));
         content.addView(text("Timeframe", 13, ACCENT));
         content.addView(choiceRow(Settings.TIMEFRAMES, cfg.timeframe, new OnChoice() {
             public void pick(String v) {

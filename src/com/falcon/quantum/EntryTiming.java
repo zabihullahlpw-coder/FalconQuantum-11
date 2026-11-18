@@ -51,6 +51,9 @@ public final class EntryTiming {
             if(why!=null) { r.ready=false; r.status="WAIT"; r.reason=why; }
             else r.reasons.add("Closed 1h/4h trend and EMA21 pullback agree (experimental)");
         }
+        // Only after original signal scoring and its confirmation/pullback gates.
+        // Both foreground and background scanners use this one final plan.
+        TradeDirection.apply(r,cfg);
         return r;
     }
 }

@@ -1,4 +1,4 @@
-name: Build Falcon Quantum 11 safety-preview APK
+name: Build Falcon Quantum 11.0.1 reverse safety-preview APK
 
 on:
   push:
@@ -48,20 +48,19 @@ jobs:
           mkdir -p apk-delivery
           "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "${apks[0]}"
           "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "${apks[0]}" > apk-delivery/apk-metadata.txt
-          python3 - <<'PY'
+          python3 - <<'PYAPK'
           from pathlib import Path
-          txt = Path('apk-delivery/apk-metadata.txt').read_text()
-          first = txt.splitlines()[0]
+          first = Path('apk-delivery/apk-metadata.txt').read_text().splitlines()[0]
           assert "name='com.falcon.quantum.audit'" in first, first
-          assert "versionCode='11000'" in first, first
-          assert "versionName='11.0.0-safety-preview-debug'" in first, first
-          PY
-          cp "${apks[0]}" apk-delivery/FalconQuantum-11.0.0-safety-preview-debug.apk
-          (cd apk-delivery && sha256sum FalconQuantum-11.0.0-safety-preview-debug.apk > SHA256.txt)
+          assert "versionCode='11001'" in first, first
+          assert "versionName='11.0.1-reverse-safety-preview-debug'" in first, first
+          PYAPK
+          cp "${apks[0]}" apk-delivery/FalconQuantum-11.0.1-reverse-safety-preview-debug.apk
+          (cd apk-delivery && sha256sum FalconQuantum-11.0.1-reverse-safety-preview-debug.apk > SHA256.txt)
       - name: Upload verified APK
         uses: actions/upload-artifact@v4
         with:
-          name: FalconQuantum-11-safety-preview-apk
+          name: FalconQuantum-11.0.1-reverse-apk
           path: apk-delivery/
           if-no-files-found: error
           retention-days: 14

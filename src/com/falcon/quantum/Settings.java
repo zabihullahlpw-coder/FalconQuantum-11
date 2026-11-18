@@ -54,6 +54,8 @@ public final class Settings {
     public String marginMode = "ISOLATED";
     public boolean allowLong = true;
     public boolean allowShort = true;
+    /** Experimental: invert finalized new-entry directions, never existing positions or exits. */
+    public boolean reverseTradeDirection = false;
     public double riskPercent = 0.25;
     public double dailyLossPercent = 1.0;
     public double feeBps = 5.0, slippageBps = 2.0;
@@ -113,6 +115,7 @@ public final class Settings {
         s.marginMode = p.getString(key(env, "margin"), "ISOLATED");
         s.allowLong = p.getBoolean(key(env, "long"), true);
         s.allowShort = p.getBoolean(key(env, "short"), true);
+        s.reverseTradeDirection = p.getBoolean(key(env, "reverse_entries"), false);
         s.riskPercent = p.getFloat(key(env, "risk_v2"), 0.25f);
         s.dailyLossPercent = p.getFloat(key(env,"daily_pct"),1f);
         s.feeBps = p.getFloat(key(env,"fee_bps"),5f);
@@ -157,6 +160,7 @@ public final class Settings {
         e.putString(key(env, "margin"), marginMode);
         e.putBoolean(key(env, "long"), allowLong);
         e.putBoolean(key(env, "short"), allowShort);
+        e.putBoolean(key(env, "reverse_entries"), reverseTradeDirection);
         e.putFloat(key(env, "risk_v2"), (float) riskPercent);
         e.putFloat(key(env,"daily_pct"),(float)dailyLossPercent);
         e.putFloat(key(env,"fee_bps"),(float)feeBps);
@@ -281,12 +285,14 @@ public final class Settings {
 
     /** Human-readable summary for the header. */
     public String describe() {
-        if (!isFutures()) return "SPOT · buy only · no leverage";
+        if (!isFutures()) return "SPOT · buy only · no leverage"
+                + (reverseTradeDirection ? " · reverse mode blocked in SPOT" : "");
         StringBuilder sb = new StringBuilder("FUTURES · ");
         sb.append(leverage).append("x · ").append(marginMode).append(" · ");
         if (allowLong && allowShort) sb.append("LONG/SHORT");
         else if (allowLong) sb.append("LONG only");
         else sb.append("SHORT only");
+        if (reverseTradeDirection) sb.append(" · REVERSE ON");
         return sb.toString();
     }
 

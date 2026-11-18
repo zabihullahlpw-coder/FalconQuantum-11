@@ -2,7 +2,7 @@ package com.falcon.quantum;
 
 /** Settings fingerprints and honest status text; LIVE permission is an operator preference. */
 public final class Readiness {
-    public static final String MODEL_VERSION="11.0.1-reverse-safety-preview";
+    public static final String MODEL_VERSION="11.0.2-exact-swap-safety-preview";
     private Readiness() {}
     private static String n(double value){return String.format(java.util.Locale.US,"%.4f",value);}
     public static String liveOrderStatus(boolean enabled) {

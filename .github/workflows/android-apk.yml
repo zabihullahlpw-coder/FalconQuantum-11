@@ -1,4 +1,4 @@
-name: Build Falcon Quantum 11.0.1 reverse safety-preview APK
+name: Build Falcon Quantum 11.0.2 exact-swap safety-preview APK
 
 on:
   push:
@@ -52,15 +52,15 @@ jobs:
           from pathlib import Path
           first = Path('apk-delivery/apk-metadata.txt').read_text().splitlines()[0]
           assert "name='com.falcon.quantum.audit'" in first, first
-          assert "versionCode='11001'" in first, first
-          assert "versionName='11.0.1-reverse-safety-preview-debug'" in first, first
+          assert "versionCode='11002'" in first, first
+          assert "versionName='11.0.2-exact-swap-safety-preview-debug'" in first, first
           PYAPK
-          cp "${apks[0]}" apk-delivery/FalconQuantum-11.0.1-reverse-safety-preview-debug.apk
-          (cd apk-delivery && sha256sum FalconQuantum-11.0.1-reverse-safety-preview-debug.apk > SHA256.txt)
+          cp "${apks[0]}" apk-delivery/FalconQuantum-11.0.2-exact-swap-safety-preview-debug.apk
+          (cd apk-delivery && sha256sum FalconQuantum-11.0.2-exact-swap-safety-preview-debug.apk > SHA256.txt)
       - name: Upload verified APK
         uses: actions/upload-artifact@v4
         with:
-          name: FalconQuantum-11.0.1-reverse-apk
+          name: FalconQuantum-11.0.2-exact-swap-apk
           path: apk-delivery/
           if-no-files-found: error
           retention-days: 14

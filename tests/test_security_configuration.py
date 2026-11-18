@@ -31,8 +31,13 @@ class SecuritySettingsTests(unittest.TestCase):
         self.assertRegex(code, r'public static boolean liveArmed\(Context ctx\) \{\s*return false;')
         ui = (root/'src/com/falcon/quantum/MainActivity.java').read_text()
         self.assertNotIn('Enable LIVE order sending (real funds)', ui)
-        self.assertIn('securePcUrl(saved)', ui)
-        self.assertIn('MIXED_CONTENT_NEVER_ALLOW', ui)
+        self.assertNotIn('"PC"', ui)
+        self.assertNotIn('WebView', ui)
+        self.assertNotIn('renderPc', ui)
+        self.assertNotIn('securePcUrl', ui)
+        self.assertNotIn('loadDesktopLink', (root/'src/com/falcon/quantum/SecureKeys.java').read_text())
+        self.assertIn('purgeRetiredDesktopLink', ui)
+        self.assertFalse((root/'res/layout/activity_main.xml').exists())
 
 if __name__ == '__main__':
     unittest.main()

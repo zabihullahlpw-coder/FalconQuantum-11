@@ -1,6 +1,5 @@
 package com.falcon.quantum;
 
-import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
@@ -16,11 +15,6 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.webkit.WebResourceError;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebSettings;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
@@ -40,7 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Falcon Quantum mobile - full desktop parity on the phone.
+ * Falcon Quantum mobile - self-contained trading and analysis app.
  *
  * PAPER / DEMO / LIVE are fully separate environments, each with its own
  * market type (Spot or Futures), leverage, margin mode, direction
@@ -67,7 +61,6 @@ public class MainActivity extends Activity {
     private LinearLayout envBar, tabBar, content;
     private ScrollView pageScroll;
     private TextView header, statusLine;
-    private WebView webView;
 
     private Strategy strategy;
     private Settings cfg;
@@ -99,6 +92,7 @@ public class MainActivity extends Activity {
         env = prefs().getString(KEY_ENV, "PAPER");
         strategy = Strategy.load(this);
         cfg = Settings.load(this, env);
+        SecureKeys.purgeRetiredDesktopLink(this);
 
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
@@ -149,13 +143,6 @@ public class MainActivity extends Activity {
         content.setPadding(dp(12), 0, dp(12), dp(28));
         pageScroll.addView(content);
         root.addView(pageScroll);
-
-        webView = new WebView(this);
-        webView.setVisibility(View.GONE);
-        webView.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
-        configureWebView();
-        root.addView(webView);
 
         setContentView(root);
         // Survive an app restart: if background scanning was left on, bring
@@ -210,7 +197,7 @@ public class MainActivity extends Activity {
     private void buildTabs() {
         tabBar.removeAllViews();
         String[] tabs = {"SCAN", "HOLDING", "TRADES", "HISTORY", "LEARN", "ERRORS",
-                "MARKET", "STRATEGY", "COINS", "ACCOUNT", "PC"};
+                "MARKET", "STRATEGY", "COINS", "ACCOUNT"};
         for (int i = 0; i < tabs.length; i++) {
             final String t = tabs[i];
             boolean active = t.equals(tab);
@@ -307,11 +294,6 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         statusLine.setText(env + " · " + cfg.describe());
 
-        if ("PC".equals(t)) {
-            renderPc();
-            return;
-        }
-        webView.setVisibility(View.GONE);
         pageScroll.setVisibility(View.VISIBLE);
         content.setVisibility(View.VISIBLE);
 
@@ -1506,8 +1488,9 @@ public class MainActivity extends Activity {
                     }
                 }));
         content.addView(text("OFF by default. Applies ONLY to newly finalized FUTURES entries "
-                + "in " + env + "; preserves the original risk/target distances with "
-                + "opposite stop-loss and take-profit. SPOT entries are blocked while "
+                + "in " + env + "; swaps the EXACT existing SL and TP prices "
+                + "(old SL becomes TP; old TP becomes SL). Effective risk/reward "
+                + "changes. SPOT entries are blocked while "
                 + "reverse is enabled. Does not reverse exits or existing positions. "
                 + "This may increase losses; test in PAPER first.", 11, AMBER));
         content.addView(text("Timeframe", 13, ACCENT));
@@ -2269,112 +2252,6 @@ public class MainActivity extends Activity {
         });
     }
 
-    // ------------------------------------------------------------------- PC
-
-    private void renderPc() {
-        String saved;
-        try { saved = SecureKeys.loadDesktopLink(this); }
-        catch (RuntimeException error) {
-            SecureKeys.clearDesktopLink(this);
-            saved = "";
-            toast("Desktop link could not be recovered; enter a new secure link");
-        }
-        if (saved == null || saved.length() == 0) {
-            pageScroll.setVisibility(View.VISIBLE);
-            webView.setVisibility(View.GONE);
-            content.setVisibility(View.VISIBLE);
-            content.addView(text("Connect to the Falcon desktop app using the phone link "
-                    + "in the desktop sidebar. HTTPS is required; old HTTP-only links cannot be used.", 12, MUTED));
-            final EditText in = new EditText(this);
-            in.setHint("https://your-secure-desktop-host/m/your-token");
-            style(in);
-            content.addView(in);
-            Button go = bigButton("CONNECT", 0xFF1D3554);
-            go.setOnClickListener(new View.OnClickListener() {
-                public void onClick(View v) {
-                    String u = in.getText().toString().trim();
-                    if (u.length() == 0) {
-                        toast("Enter the address first");
-                        return;
-                    }
-                    if (!securePcUrl(u)) {
-                        toast("Use a valid HTTPS desktop link; HTTP is blocked to protect the token");
-                        return;
-                    }
-                    try { SecureKeys.saveDesktopLink(MainActivity.this, u); }
-                    catch (RuntimeException error) {
-                        toast("Could not protect the desktop link");
-                        return;
-                    }
-                    show("PC");
-                }
-            });
-            content.addView(go);
-            return;
-        }
-        if (!securePcUrl(saved)) {
-            SecureKeys.clearDesktopLink(this);
-            pageScroll.setVisibility(View.VISIBLE);
-            content.setVisibility(View.VISIBLE);
-            renderPc();
-            content.addView(text("The saved PC address used an insecure or invalid URL and was cleared. "
-                    + "Configure a HTTPS endpoint before reconnecting.", 12, AMBER));
-            webView.setVisibility(View.GONE);
-            return;
-        }
-        pageScroll.setVisibility(View.GONE);
-        webView.setVisibility(View.VISIBLE);
-        webView.loadUrl(saved);
-        Button forget = bigButton("CHANGE PC ADDRESS", PANEL);
-        forget.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                SecureKeys.clearDesktopLink(MainActivity.this);
-                show("PC");
-            }
-        });
-        tabBar.addView(forget); // Visible even while the PC WebView is full-screen.
-    }
-
-    private static boolean securePcUrl(String value) {
-        try {
-            java.net.URI uri = new java.net.URI(value);
-            return "https".equalsIgnoreCase(uri.getScheme())
-                && uri.getHost() != null && !uri.getHost().isEmpty()
-                && uri.getUserInfo() == null && uri.getFragment() == null;
-        } catch (Exception ignored) { return false; }
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private void configureWebView() {
-        WebSettings s = webView.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);
-        s.setUseWideViewPort(true);
-        s.setLoadWithOverviewMode(true);
-        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        s.setAllowFileAccess(false);
-        s.setAllowContentAccess(false);
-        s.setJavaScriptCanOpenWindowsAutomatically(false);
-        webView.setBackgroundColor(BG);
-        webView.setWebViewClient(new WebViewClient() {
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
-                if (!securePcUrl(String.valueOf(r.getUrl()))) {
-                    statusLine.setText("Blocked non-HTTPS navigation");
-                    return true;
-                }
-                return false;
-            }
-
-            @Override
-            public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
-                if (r != null && !r.isForMainFrame()) return;
-                statusLine.setText("Cannot reach PC. Check Wi-Fi and the desktop app.");
-            }
-        });
-    }
-
     @Override
     protected void onStop() {
         super.onStop();
@@ -2425,10 +2302,6 @@ public class MainActivity extends Activity {
     @Override
     public boolean onKeyDown(int code, KeyEvent e) {
         if (code == KeyEvent.KEYCODE_BACK) {
-            if ("PC".equals(tab) && webView.getVisibility() == View.VISIBLE && webView.canGoBack()) {
-                webView.goBack();
-                return true;
-            }
             if (!"SCAN".equals(tab)) {
                 show("SCAN");
                 return true;

@@ -17,7 +17,7 @@ public final class ReverseTradeDirectionTests {
         r.side=side;r.symbol="BTCUSDT";r.entry=100;
         r.stop="LONG".equals(side)?98:102;
         r.target="LONG".equals(side)?104:96;
-        r.ready=true;r.status="READY";r.grade="A";r.reason="READY";
+        r.ready=true;r.status="READY";r.grade="A";r.reason="READY";r.riskReward=2.0;
         return r;
     }
     public static void main(String[] args) {
@@ -44,19 +44,21 @@ public final class ReverseTradeDirectionTests {
         Engine.Row fromLong=row("LONG");
         TradeDirection.apply(fromLong,paper);
         ok("SHORT".equals(fromLong.side)&&"LONG".equals(fromLong.signalSide),"LONG signal opens SHORT");
-        eq(fromLong.stop,102,"reversed SHORT stop is above entry");
-        eq(fromLong.target,96,"reversed SHORT target is below entry");
+        eq(fromLong.stop,104,"reversed SHORT stop is EXACT original TP");
+        eq(fromLong.target,98,"reversed SHORT target is EXACT original SL");
+        eq(fromLong.riskReward,0.5,"reversed RR reflects swapped prices");
         ok(fromLong.ready&&fromLong.directionReversed,"eligible reversed SHORT stays READY");
         ok(!fromLong.warnings.isEmpty(),"reversal is clearly labelled experimental");
         TradeDirection.apply(fromLong,paper);
-        ok("SHORT".equals(fromLong.side)&&fromLong.stop==102&&fromLong.target==96,
+        ok("SHORT".equals(fromLong.side)&&fromLong.stop==104&&fromLong.target==98,
                 "second application never double-inverts");
 
         Engine.Row fromShort=row("SHORT");
         TradeDirection.apply(fromShort,paper);
         ok("LONG".equals(fromShort.side)&&"SHORT".equals(fromShort.signalSide),"SHORT signal opens LONG");
-        eq(fromShort.stop,98,"reversed LONG stop is below entry");
-        eq(fromShort.target,104,"reversed LONG target is above entry");
+        eq(fromShort.stop,96,"reversed LONG stop is EXACT original TP");
+        eq(fromShort.target,102,"reversed LONG target is EXACT original SL");
+        eq(fromShort.riskReward,0.5,"reversed LONG RR reflects swapped prices");
         ok(fromShort.ready,"eligible reversed LONG stays READY");
 
         paper.allowShort=false;paper.allowLong=true;
@@ -77,7 +79,18 @@ public final class ReverseTradeDirectionTests {
         ok(!bad.ready&&!bad.directionReversed,"invalid input bracket is blocked");
         bad=row("LONG");bad.entry=2;bad.stop=1;bad.target=5;
         TradeDirection.apply(bad,paper);
-        ok(!bad.ready&&!bad.directionReversed,"inverted negative target blocked");
+        ok(bad.ready&&bad.directionReversed,"small-price plans use exact swaps, never mirrored negatives");
+        eq(bad.stop,5,"old TP 5 becomes exact SL");
+        eq(bad.target,1,"old SL 1 becomes exact TP");
+        Engine.Row exact=row("LONG");
+        exact.entry=103.6371;exact.stop=99.4189;exact.target=117.6397;
+        final long oldSL=Double.doubleToLongBits(exact.stop);
+        final long oldTP=Double.doubleToLongBits(exact.target);
+        TradeDirection.apply(exact,paper);
+        ok(Double.doubleToLongBits(exact.target)==oldSL &&
+                Double.doubleToLongBits(exact.stop)==oldTP,"no price rounding or recalculation");
+        eq(exact.riskReward,(103.6371-99.4189)/(117.6397-103.6371),
+                "effective RR computed from exact swapped prices");
         ok(!Trader.liveArmed(ctx),"reversal does not enable LIVE trading");
         System.out.println("PASS "+checks+" reverse-direction and settings checks");
     }

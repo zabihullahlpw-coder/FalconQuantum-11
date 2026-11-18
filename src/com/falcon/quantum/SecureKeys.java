@@ -146,55 +146,14 @@ public final class SecureKeys {
         return new String[] { key, secret };
     }
 
-    /** Encrypt the desktop URL too: its path may contain an access token. */
-    public static synchronized void saveDesktopLink(Context ctx, String url) {
-        if (url == null || !url.startsWith("https://"))
-            throw new IllegalArgumentException("A HTTPS desktop URL is required");
-        try {
-            String encrypted = encrypt("PC_LINK", url, "");
-            if (!ctx.getSharedPreferences(VAULT, Context.MODE_PRIVATE).edit()
-                    .putString("pc_link", encrypted).commit())
-                throw new IllegalStateException("Desktop URL was not securely saved");
-            ctx.getSharedPreferences("falcon_prefs", Context.MODE_PRIVATE).edit()
-                    .remove("server_url").commit();
-        } catch (Exception error) {
-            throw new IllegalStateException("Desktop URL secure storage unavailable", error);
-        }
-    }
-
-    public static synchronized String loadDesktopLink(Context ctx) {
-        String blob = ctx.getSharedPreferences(VAULT, Context.MODE_PRIVATE)
-                .getString("pc_link", null);
-        if (blob != null) {
-            try {
-                String url = decrypt("PC_LINK", blob)[0];
-                if (!url.startsWith("https://"))
-                    throw new IllegalStateException("Insecure desktop URL rejected");
-                ctx.getSharedPreferences("falcon_prefs", Context.MODE_PRIVATE).edit()
-                        .remove("server_url").commit();
-                return url;
-            } catch (Exception error) {
-                throw new IllegalStateException("Saved desktop link cannot be decrypted", error);
-            }
-        }
-        // Move old HTTPS links to the secure vault; drop insecure HTTP links.
-        String legacy = ctx.getSharedPreferences("falcon_prefs", Context.MODE_PRIVATE)
-                .getString("server_url", "");
-        if (legacy.startsWith("https://")) {
-            saveDesktopLink(ctx, legacy);
-            return legacy;
-        }
-        ctx.getSharedPreferences("falcon_prefs", Context.MODE_PRIVATE).edit()
-                .remove("server_url").commit();
-        return "";
-    }
-
-    public static synchronized void clearDesktopLink(Context ctx) {
-        if (!ctx.getSharedPreferences(VAULT, Context.MODE_PRIVATE).edit()
-                .remove("pc_link").commit())
-            throw new IllegalStateException("Failed to remove desktop link");
-        ctx.getSharedPreferences("falcon_prefs", Context.MODE_PRIVATE).edit()
-                .remove("server_url").commit();
+    /** One-time disposal of retired desktop-link data; trading keys remain intact. */
+    public static synchronized void purgeRetiredDesktopLink(Context ctx) {
+        SharedPreferences state = ctx.getSharedPreferences("falcon_prefs", Context.MODE_PRIVATE);
+        if (state.getBoolean("desktop_link_retired_11002", false)) return;
+        ctx.getSharedPreferences(VAULT, Context.MODE_PRIVATE).edit()
+                .remove("pc_link").apply();
+        state.edit().remove("server_url")
+                .putBoolean("desktop_link_retired_11002", true).apply();
     }
 
     public static synchronized void clear(Context ctx, String env) {

@@ -4,7 +4,7 @@ This is an updated source code candidate based on the uploaded Falcon Quantum 10
 
 **Safety preview behavior:** New LIVE entries are refused at the UI, shared execution and low-level transport permission checks, irrespective of pre-existing preferences. Existing LIVE positions can still be inspected and managed using connected credentials. PAPER simulations and DEMO testnet remain available. Do not interpret simulated gains as real financial returns.
 
-**Security improvements:** Android Keystore AES-GCM encryption for API credentials and desktop connection tokens, one-time migration from legacy plaintext preferences, no Android backups/transfer of app data, no HTTP cleartext or mixed WebView content, no prefilled API secrets. The PC link now requires HTTPS and will refuse the original HTTP-only desktop link; an HTTPS endpoint is a prerequisite.
+**Security improvements:** Android Keystore AES-GCM encryption for API credentials, one-time migration from legacy plaintext preferences, no Android backups/transfer of app data, no HTTP cleartext traffic, and no prefilled API secrets. PC connection and WebView have been removed; any previously stored PC link is cleared on app start.
 
 **Safer initial settings:** 0.25% modeled risk per simulated trade, 1% daily loss budget, 1x isolated margin, one open position, 10% maximum margin allocation by default, three-loss pause, and 30-second scan cadence. DEMO testnet caps leverage at 3x, risk budget at 0.5% per trade, daily loss budget at 2%, and margin allocation at 25%. Persisted settings are clamped when loaded; these controls are estimates, not guarantees against stop slippage or trading losses.
 
@@ -70,3 +70,5 @@ The first command parses all production Java and compiles/tests core classes aga
 See [docs/VALIDATION.md](docs/VALIDATION.md) for exact commands and assumptions. In brief: download public contract/mark/funding history, compare candidates on development/validation windows, freeze one candidate, evaluate it once on the held-out window, then collect forward PAPER and DEMO execution evidence. LIVE entry remains hard-disabled in 11.0 even if an older version saved an enabled checkbox.
 
 DEMO entries are Futures only; LIVE new entries are disabled. SPOT is PAPER-only. Existing exchange positions can still be inspected, protected when an original tracked plan is available, or manually closed, including while LIVE entry permission is off. Untracked/legacy positions are not assigned invented stops; inspect their protection directly on Binance.
+
+**11.0.2 change:** The Reverse Trade Direction setting now swaps exact stop-loss and take-profit prices (prior SL → TP and prior TP → SL), without mirroring or rounding. The effective reward/risk can differ sharply from the original. PC Connect has been removed. This remains a PAPER/DEMO safety-preview; new LIVE orders are blocked.

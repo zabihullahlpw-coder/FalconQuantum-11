@@ -54,6 +54,13 @@ public final class RegressionTests {
   demoDefault.leverage=20;demoDefault.marginMode="CROSS";demoDefault.riskPercent=10;demoDefault.dailyLossPercent=10;demoDefault.sizePercent=100;
   demoDefault.validated();
   ok(demoDefault.leverage==3,"testnet leverage capped at 3x");
+  Settings paperLeverage=Settings.load(ctx,"PAPER");
+  paperLeverage.leverage=7;paperLeverage.validated();ok(paperLeverage.leverage==7,"PAPER preserves 7x");
+  paperLeverage.leverage=149;paperLeverage.validated();ok(paperLeverage.leverage==149,"PAPER preserves 149x");
+  paperLeverage.leverage=151;paperLeverage.validated();ok(paperLeverage.leverage==150,"PAPER upper bound 150x");
+  paperLeverage.leverage=0;paperLeverage.validated();ok(paperLeverage.leverage==1,"PAPER lower bound 1x");
+  Settings liveLeverage=Settings.load(ctx,"LIVE");
+  liveLeverage.leverage=150;liveLeverage.validated();ok(liveLeverage.leverage==1,"LIVE unchanged 1x");
   ok("ISOLATED".equals(demoDefault.marginMode),"testnet disallows cross margin");
   eq(demoDefault.riskPercent,.5,"maximum risk per trade capped at 0.5 percent");
   eq(demoDefault.dailyLossPercent,2,"maximum daily loss capped at 2 percent");

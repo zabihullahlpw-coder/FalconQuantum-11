@@ -39,11 +39,9 @@ public final class Settings {
         return (seconds / 3600) + "h";
     }
 
-    /** Existing leverage choices retained; monetary risk limits apply separately. */
+    /** All integer settings are available for local PAPER simulation only. */
     public static int maxLeverage(String env) {
-        // PAPER may simulate aggressive settings, but testnet and LIVE are
-        // deliberately conservative; LIVE new entries are separately blocked.
-        return "PAPER".equals(env) ? 20 : ("DEMO".equals(env) ? 3 : 1);
+        return "PAPER".equals(env) ? 150 : ("DEMO".equals(env) ? 3 : 1);
     }
 
     private static final String PREFS = "falcon_env";
@@ -206,13 +204,19 @@ public final class Settings {
             allowLong = true;
             allowShort = false;
         } else {
-            int ceiling = maxLeverage(env);
-            int snapped = 1;
-            for (int i = 0; i < LEVERAGE_LADDER.length; i++) {
-                int rung = LEVERAGE_LADDER[i];
-                if (rung <= ceiling && rung <= leverage) snapped = rung;
+            if ("PAPER".equals(env)) {
+                // No exchange requests, no real funds: exact 1x–150x whole-number simulation.
+                leverage = Math.max(1, Math.min(maxLeverage(env), leverage));
+            } else {
+                // Existing exchange DEMO limit and LIVE safeguards remain unchanged.
+                int ceiling = maxLeverage(env);
+                int snapped = 1;
+                for (int i = 0; i < LEVERAGE_LADDER.length; i++) {
+                    int rung = LEVERAGE_LADDER[i];
+                    if (rung <= ceiling && rung <= leverage) snapped = rung;
+                }
+                leverage = snapped;
             }
-            leverage = snapped;
             // Both directions off would freeze the engine.
             if (!allowLong && !allowShort) allowLong = true;
         }

@@ -1417,6 +1417,34 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Allow exact integer leverage only in the zero-money PAPER simulator. */
+    private void choosePaperLeverage() {
+        if (!"PAPER".equals(env) || !cfg.isFutures()) return;
+        final EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER);
+        input.setSingleLine(true);
+        input.setText(String.valueOf(cfg.leverage));
+        input.setSelectAllOnFocus(true);
+        input.setTextColor(TEXT);
+        new AlertDialog.Builder(this)
+            .setTitle("PAPER leverage · 1x–150x")
+            .setMessage("Simulated trades only. Changing leverage affects virtual outcomes, not any exchange account.")
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save", new DialogInterface.OnClickListener() {
+                public void onClick(DialogInterface d, int which) {
+                    int chosen;
+                    try { chosen = Integer.parseInt(input.getText().toString().trim()); }
+                    catch (Exception e) { toast("Enter a whole number from 1 to 150"); return; }
+                    if (chosen < 1 || chosen > 150) { toast("Choose 1x–150x"); return; }
+                    cfg.leverage = chosen;
+                    cfg.save(MainActivity.this);
+                    lastRows.clear();
+                    show("MARKET");
+                }
+            }).show();
+    }
+
     private void renderMarket() {
         content.addView(text("Market type for " + env, 13, ACCENT));
         content.addView(choiceRow(Settings.TRADING_MODES, cfg.tradingMode,
@@ -1432,21 +1460,32 @@ public class MainActivity extends Activity {
             content.addView(text("Spot is buy-only: no leverage and no shorting. "
                     + "Switch to Futures to enable shorts and leverage.", 12, MUTED));
         } else {
-            content.addView(text("Leverage (max " + Settings.maxLeverage(env)
-                    + "x for " + env + ")", 13, ACCENT));
-            List<String> rungs = new ArrayList<String>();
-            for (int i = 0; i < Settings.LEVERAGE_LADDER.length; i++) {
-                int r = Settings.LEVERAGE_LADDER[i];
-                if (r <= Settings.maxLeverage(env)) rungs.add(r + "x");
+            content.addView(text("Leverage (" + cfg.leverage + "x)", 13, ACCENT));
+            if ("PAPER".equals(env)) {
+                Button choose = bigButton("SELECT SIMULATED LEVERAGE · " + cfg.leverage + "x", 0xFF1D3554);
+                choose.setOnClickListener(new View.OnClickListener() {
+                    public void onClick(View v) { choosePaperLeverage(); }
+                });
+                content.addView(choose);
+                content.addView(text("PAPER only: choose any whole-number leverage from 1x to 150x. "
+                        + "Virtual balances only; this does not enable exchange orders.", 11, MUTED));
+            } else {
+                content.addView(text("DEMO testnet leverage stays within its existing limits; "
+                        + "LIVE new entries remain disabled.", 11, MUTED));
+                List<String> rungs = new ArrayList<String>();
+                for (int i = 0; i < Settings.LEVERAGE_LADDER.length; i++) {
+                    int r = Settings.LEVERAGE_LADDER[i];
+                    if (r <= Settings.maxLeverage(env)) rungs.add(r + "x");
+                }
+                content.addView(choiceRow(rungs.toArray(new String[rungs.size()]),
+                        cfg.leverage + "x", new OnChoice() {
+                            public void pick(String v) {
+                                cfg.leverage = Integer.parseInt(v.replace("x", ""));
+                                cfg.save(MainActivity.this);
+                                show("MARKET");
+                            }
+                        }));
             }
-            content.addView(choiceRow(rungs.toArray(new String[rungs.size()]),
-                    cfg.leverage + "x", new OnChoice() {
-                        public void pick(String v) {
-                            cfg.leverage = Integer.parseInt(v.replace("x", ""));
-                            cfg.save(MainActivity.this);
-                            show("MARKET");
-                        }
-                    }));
 
             content.addView(text("Margin mode", 13, ACCENT));
             content.addView(choiceRow(Settings.MARGIN_MODES, cfg.marginMode, new OnChoice() {

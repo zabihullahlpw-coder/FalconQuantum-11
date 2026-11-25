@@ -72,3 +72,6 @@ See [docs/VALIDATION.md](docs/VALIDATION.md) for exact commands and assumptions.
 DEMO entries are Futures only; LIVE new entries are disabled. SPOT is PAPER-only. Existing exchange positions can still be inspected, protected when an original tracked plan is available, or manually closed, including while LIVE entry permission is off. Untracked/legacy positions are not assigned invented stops; inspect their protection directly on Binance.
 
 **11.0.2 change:** The Reverse Trade Direction setting now swaps exact stop-loss and take-profit prices (prior SL → TP and prior TP → SL), without mirroring or rounding. The effective reward/risk can differ sharply from the original. PC Connect has been removed. This remains a PAPER/DEMO safety-preview; new LIVE orders are blocked.
+
+## 11.0.3 paper leverage
+The MARKET screen now supports all integer 1x–150x leverage settings for **PAPER (virtual-funds local simulation) only**. DEMO retains its 3x leverage limit and LIVE entry restrictions remain in place. See `docs/PAPER_LEVERAGE_11_0_3.md`.

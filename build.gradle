@@ -11,8 +11,8 @@ android {
         applicationId 'com.falcon.quantum'
         minSdk 24
         targetSdk 34
-        versionCode 11004
-        versionName '11.0.4-reverse'
+        versionCode 11005
+        versionName '11.0.5-reverse'
     }
     sourceSets {
         main {

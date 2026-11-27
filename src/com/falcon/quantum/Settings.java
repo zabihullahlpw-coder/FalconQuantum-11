@@ -25,7 +25,8 @@ public final class Settings {
     public static final String[] ENVIRONMENTS = {"PAPER", "DEMO", "LIVE"};
     public static final String[] TRADING_MODES = {"SPOT", "FUTURES"};
     public static final String[] MARGIN_MODES = {"ISOLATED", "CROSS"};
-    public static final int[] LEVERAGE_LADDER = {1, 2, 3, 5, 10, 20};
+    public static final int MAX_FUTURES_LEVERAGE = 150;
+    public static final int MAX_POSITIONS = 10;
     public static final String[] TIMEFRAMES = {"5m", "15m", "30m", "1h", "4h"};
     /** Selectable gaps between automatic scan cycles. */
     public static final int[] SCAN_INTERVALS = {5, 10, 15, 30, 60, 120, 300};
@@ -37,11 +38,6 @@ public final class Settings {
         if (seconds < 60) return seconds + "s";
         if (seconds % 60 == 0 && seconds < 3600) return (seconds / 60) + "m";
         return (seconds / 3600) + "h";
-    }
-
-    /** All integer settings are available for local PAPER simulation only. */
-    public static int maxLeverage(String env) {
-        return "PAPER".equals(env) ? 150 : ("DEMO".equals(env) ? 3 : 1);
     }
 
     private static final String PREFS = "falcon_env";
@@ -204,19 +200,7 @@ public final class Settings {
             allowLong = true;
             allowShort = false;
         } else {
-            if ("PAPER".equals(env)) {
-                // No exchange requests, no real funds: exact 1x–150x whole-number simulation.
-                leverage = Math.max(1, Math.min(maxLeverage(env), leverage));
-            } else {
-                // Existing exchange DEMO limit and LIVE safeguards remain unchanged.
-                int ceiling = maxLeverage(env);
-                int snapped = 1;
-                for (int i = 0; i < LEVERAGE_LADDER.length; i++) {
-                    int rung = LEVERAGE_LADDER[i];
-                    if (rung <= ceiling && rung <= leverage) snapped = rung;
-                }
-                leverage = snapped;
-            }
+            leverage = Math.max(1, Math.min(MAX_FUTURES_LEVERAGE, leverage));
             // Both directions off would freeze the engine.
             if (!allowLong && !allowShort) allowLong = true;
         }
@@ -230,9 +214,7 @@ public final class Settings {
         if (Double.isNaN(maxDailyLoss) || Double.isInfinite(maxDailyLoss) || maxDailyLoss<0) maxDailyLoss=0;
         // The audit build requires exchange protection for every new real/testnet trade.
         managedStop=false; neverCloseByFalcon=false; askBeforeFalconStop=false;
-        if (maxPositions < 1) maxPositions = 1;
-        if (maxPositions > ("PAPER".equals(env) ? 10 : 2))
-            maxPositions = "PAPER".equals(env) ? 10 : 2;
+        maxPositions = Math.max(1, Math.min(MAX_POSITIONS, maxPositions));
         if (maxConsecutiveLosses < 1) maxConsecutiveLosses = 3;
         if (maxConsecutiveLosses > 10) maxConsecutiveLosses = 10;
         if (scanLimit < 5) scanLimit = 5;

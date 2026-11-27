@@ -53,14 +53,23 @@ public final class RegressionTests {
   ok(demoDefault.maxPositions==1&&demoDefault.maxConsecutiveLosses==3,"DEMO limits exposure and losses by default");
   demoDefault.leverage=20;demoDefault.marginMode="CROSS";demoDefault.riskPercent=10;demoDefault.dailyLossPercent=10;demoDefault.sizePercent=100;
   demoDefault.validated();
-  ok(demoDefault.leverage==3,"testnet leverage capped at 3x");
-  Settings paperLeverage=Settings.load(ctx,"PAPER");
-  paperLeverage.leverage=7;paperLeverage.validated();ok(paperLeverage.leverage==7,"PAPER preserves 7x");
-  paperLeverage.leverage=149;paperLeverage.validated();ok(paperLeverage.leverage==149,"PAPER preserves 149x");
-  paperLeverage.leverage=151;paperLeverage.validated();ok(paperLeverage.leverage==150,"PAPER upper bound 150x");
-  paperLeverage.leverage=0;paperLeverage.validated();ok(paperLeverage.leverage==1,"PAPER lower bound 1x");
-  Settings liveLeverage=Settings.load(ctx,"LIVE");
-  liveLeverage.leverage=150;liveLeverage.validated();ok(liveLeverage.leverage==1,"LIVE unchanged 1x");
+  for (String mode : new String[]{"PAPER","DEMO","LIVE"}) {
+      Settings setting = Settings.load(ctx,mode);
+      for (int lev=1; lev<=150; lev++) {
+          setting.leverage=lev;
+          setting.maxPositions=1+(lev-1)%10;
+          setting.save(ctx);
+          Settings restored=Settings.load(ctx,mode);
+          ok(restored.leverage==lev && restored.maxPositions==setting.maxPositions,
+                  mode+" restores selected futures leverage and position limit");
+      }
+      setting.leverage=151; setting.maxPositions=11; setting.validated();
+      ok(setting.leverage==150 && setting.maxPositions==10,"upper bounds");
+      setting.leverage=0; setting.maxPositions=0; setting.validated();
+      ok(setting.leverage==1 && setting.maxPositions==1,"lower bounds");
+      setting.tradingMode="SPOT"; setting.leverage=150; setting.validated();
+      ok(setting.leverage==1,"Spot stays at 1x");
+  }
   ok("ISOLATED".equals(demoDefault.marginMode),"testnet disallows cross margin");
   eq(demoDefault.riskPercent,.5,"maximum risk per trade capped at 0.5 percent");
   eq(demoDefault.dailyLossPercent,2,"maximum daily loss capped at 2 percent");

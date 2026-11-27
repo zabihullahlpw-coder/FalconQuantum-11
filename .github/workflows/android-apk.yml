@@ -1,8 +1,8 @@
-name: Build Falcon Quantum 11.0.4 Reverse APK
+name: Build Falcon Quantum 11.0.5 Reverse APK
 
 on:
   push:
-    branches: [build/11.0.4-reverse]
+    branches: [build/11.0.5-reverse]
   workflow_dispatch:
 
 permissions:
@@ -52,15 +52,15 @@ jobs:
           from pathlib import Path
           first = Path('apk-delivery/apk-metadata.txt').read_text().splitlines()[0]
           assert "name='com.falcon.quantum.audit'" in first, first
-          assert "versionCode='11004'" in first, first
-          assert "versionName='11.0.4-reverse-debug'" in first, first
+          assert "versionCode='11005'" in first, first
+          assert "versionName='11.0.5-reverse-debug'" in first, first
           PYAPK
-          cp "${apks[0]}" apk-delivery/FalconQuantum-11.0.4-reverse-debug.apk
-          (cd apk-delivery && sha256sum FalconQuantum-11.0.4-reverse-debug.apk > SHA256.txt)
+          cp "${apks[0]}" apk-delivery/FalconQuantum-11.0.5-reverse-debug.apk
+          (cd apk-delivery && sha256sum FalconQuantum-11.0.5-reverse-debug.apk > SHA256.txt)
       - name: Upload verified APK
         uses: actions/upload-artifact@v4
         with:
-          name: FalconQuantum-11.0.4-reverse-apk
+          name: FalconQuantum-11.0.5-reverse-apk
           path: apk-delivery/
           if-no-files-found: error
           retention-days: 14

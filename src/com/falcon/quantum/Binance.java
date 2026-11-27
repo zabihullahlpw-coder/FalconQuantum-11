@@ -64,11 +64,9 @@ public final class Binance {
     /** One candle series. Parallel arrays keep the scanner allocation-light. */
     public static final class Candles {
         public double[] open, high, low, close, volume;
-        public long[] openTime, closeTime;
         public int size;
 
-        public Candles(int n) {
-            openTime = new long[n]; closeTime = new long[n];
+        Candles(int n) {
             open = new double[n];
             high = new double[n];
             low = new double[n];
@@ -96,13 +94,10 @@ public final class Binance {
     }
 
     private static String get(String path) throws Exception {
-        return get(host(),path);
-    }
-    private static String get(String marketHost,String path) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(marketHost + path).openConnection();
+        HttpURLConnection c = (HttpURLConnection) new URL(host() + path).openConnection();
         c.setConnectTimeout(TIMEOUT_MS);
         c.setReadTimeout(TIMEOUT_MS);
-        c.setRequestProperty("User-Agent", "FalconQuantum/"+Readiness.MODEL_VERSION);
+        c.setRequestProperty("User-Agent", "FalconQuantum/7.3.0");
         try {
             int code = c.getResponseCode();
             if (code != 200) {
@@ -121,21 +116,12 @@ public final class Binance {
 
     /** Candles for one symbol, oldest first. */
     public static Candles klines(String symbol, String interval, int limit) throws Exception {
-        return klines(symbol,interval,limit,futuresMarket);
-    }
-    public static Candles klines(String symbol,String interval,int limit,boolean futures) throws Exception {
-        String marketHost=futures?FUTURES_BASE:BASE,prefix=futures?"/fapi/v1":"/api/v3";
-        String body = get(marketHost,prefix + "/klines?symbol=" + symbol
+        String body = get(apiPrefix() + "/klines?symbol=" + symbol
                 + "&interval=" + interval + "&limit=" + limit);
         JSONArray arr = new JSONArray(body);
-        // Server time, not an untrusted phone clock, determines candle completion.
-        long now = new org.json.JSONObject(get(marketHost,prefix + "/time")).getLong("serverTime");
-        int count = 0;
-        while (count < arr.length() && arr.getJSONArray(count).getLong(6) < now) count++;
-        Candles c = new Candles(count);
-        for (int i = 0; i < count; i++) {
+        Candles c = new Candles(arr.length());
+        for (int i = 0; i < arr.length(); i++) {
             JSONArray k = arr.getJSONArray(i);
-            c.openTime[i]=k.getLong(0); c.closeTime[i]=k.getLong(6);
             c.open[i] = k.getDouble(1);
             c.high[i] = k.getDouble(2);
             c.low[i] = k.getDouble(3);
@@ -370,10 +356,7 @@ public final class Binance {
 
     /** Latest price for one symbol (used to mark open paper trades). */
     public static double price(String symbol) throws Exception {
-        return price(symbol,futuresMarket);
-    }
-    public static double price(String symbol,boolean futures) throws Exception {
-        String body = get(futures?FUTURES_BASE:BASE,(futures?"/fapi/v1":"/api/v3") + "/ticker/price?symbol=" + symbol);
+        String body = get(apiPrefix() + "/ticker/price?symbol=" + symbol);
         return new org.json.JSONObject(body).optDouble("price", 0);
     }
 }

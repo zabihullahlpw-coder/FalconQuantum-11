@@ -24,7 +24,7 @@ import java.util.Locale;
 public final class Journal extends SQLiteOpenHelper {
 
     private static final String DB = "falcon_journal.db";
-    private static final int VERSION = 2;
+    private static final int VERSION = 1;
 
     public Journal(Context ctx) {
         super(ctx, DB, null, VERSION);
@@ -44,73 +44,13 @@ public final class Journal extends SQLiteOpenHelper {
                 + "id INTEGER PRIMARY KEY AUTOINCREMENT,"
                 + "at INTEGER, env TEXT, symbol TEXT, stage TEXT, detail TEXT, context TEXT)");
         db.execSQL("CREATE INDEX idx_errors_at ON errors(at DESC)");
-        addEvidenceSchema(db);
     }
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldV, int newV) {
-        if (oldV < 2) addEvidenceSchema(db);
-    }
-
-    private void addEvidenceSchema(SQLiteDatabase db) {
-        String[] columns = {
-            "entry_order_id INTEGER DEFAULT 0", "client_id TEXT DEFAULT ''",
-            "position_side TEXT DEFAULT ''", "account_key TEXT DEFAULT ''",
-            "stop_order_id INTEGER DEFAULT 0", "target_order_id INTEGER DEFAULT 0",
-            "gross_pnl REAL", "commission REAL", "funding REAL", "fee_assets TEXT DEFAULT ''",
-            "cost_state TEXT DEFAULT 'LEGACY_UNVERIFIED'", "close_reason TEXT DEFAULT 'UNKNOWN'",
-            "close_detail TEXT DEFAULT ''", "exit_order_ids TEXT DEFAULT ''",
-            "initial_risk REAL DEFAULT 0", "strategy_key TEXT DEFAULT ''",
-            "signal_price REAL DEFAULT 0", "requested_close_id INTEGER DEFAULT 0",
-            "requested_close_reason TEXT DEFAULT ''", "requested_close_client TEXT DEFAULT ''"
-        };
-        for (String col : columns) db.execSQL("ALTER TABLE trades ADD COLUMN " + col);
-        db.execSQL("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, trade_id INTEGER,"
-                + "at INTEGER, env TEXT, symbol TEXT, kind TEXT, detail TEXT)");
-        db.execSQL("CREATE INDEX idx_events_trade ON events(trade_id,at)");
-    }
-
-    /** Persist an intent BEFORE sending any order. Uncertain outcomes stay pending. */
-    public long recordIntent(Settings cfg, Engine.Row row, double qty, String clientId,
-                             String accountKey, String strategyKey) {
-        long id = recordOpen(cfg.env, row.symbol, row.side, cfg.leverage, cfg.marginMode,
-                row.entry, qty, qty * row.entry, row.stop, row.target, "PENDING");
-        ContentValues v = new ContentValues();
-        v.put("status", "ENTRY_PENDING"); v.put("client_id", clientId);
-        v.put("account_key", accountKey); v.put("strategy_key", strategyKey);
-        v.put("signal_price", row.entry); v.put("initial_risk", Math.abs(row.entry-row.stop));
-        v.put("cost_state", "PENDING"); v.put("note", row.reason+" | "+row.reasons+" | "+row.warnings); update(id, v);
-        event(id, cfg.env, row.symbol, "ENTRY_INTENT", row.reason + " | " + row.reasons);
-        return id;
-    }
-
-    public void update(long id, ContentValues values) {
-        if (getWritableDatabase().update("trades", values, "id=?",
-                new String[]{String.valueOf(id)}) != 1) throw new IllegalStateException("Missing trade " + id);
-    }
-
-    public void event(long id, String env, String symbol, String kind, String detail) {
-        ContentValues v = new ContentValues();
-        v.put("trade_id", id); v.put("at", System.currentTimeMillis()); v.put("env", env);
-        v.put("symbol", symbol); v.put("kind", kind); v.put("detail", detail);
-        if (getWritableDatabase().insert("events", null, v) < 0)
-            throw new IllegalStateException("Could not persist trade evidence");
-    }
-
-    public String events(long id) {
-        StringBuilder out = new StringBuilder();
-        Cursor c = getReadableDatabase().rawQuery("SELECT at,kind,detail FROM events WHERE trade_id=? ORDER BY id",
-                new String[]{String.valueOf(id)});
-        try { while (c.moveToNext()) out.append(when(c.getLong(0))).append("  ")
-                .append(c.getString(1)).append("\n").append(c.getString(2)).append("\n\n"); }
-        finally { c.close(); }
-        return out.toString();
-    }
-
-    public Trade active(String env, String symbol, String side) {
-        for (Trade t : history(env, 10000)) if (symbol.equals(t.symbol) && side.equals(t.side)
-                && t.closedAt == 0 && !"ENTRY_REJECTED".equals(t.status)) return t;
-        return null;
+        db.execSQL("DROP TABLE IF EXISTS trades");
+        db.execSQL("DROP TABLE IF EXISTS errors");
+        onCreate(db);
     }
 
     // ------------------------------------------------------------ trades
@@ -120,10 +60,6 @@ public final class Journal extends SQLiteOpenHelper {
         public String env, symbol, side, marginMode, status, protection, note;
         public int leverage;
         public double entry, exit, qty, notional, sl, tp, pnl;
-        public long entryOrderId, stopOrderId, targetOrderId, requestedCloseId;
-        public String clientId, positionSide, accountKey, costState, closeReason, closeDetail,
-                exitOrderIds, feeAssets, strategyKey, requestedCloseReason, requestedCloseClient;
-        public double grossPnl, commission, funding, initialRisk, signalPrice;
     }
 
     /** Record an opened position. Returns its row id. */
@@ -144,9 +80,7 @@ public final class Journal extends SQLiteOpenHelper {
         v.put("protection", protection);
         v.put("opened_at", System.currentTimeMillis());
         v.put("status", "OPEN");
-        long id = getWritableDatabase().insert("trades", null, v);
-        if (id < 0) throw new IllegalStateException("Could not record trade");
-        return id;
+        return getWritableDatabase().insert("trades", null, v);
     }
 
     /** Close the most recent open row for a symbol. */
@@ -161,10 +95,7 @@ public final class Journal extends SQLiteOpenHelper {
         v.put("exit", exit);
         v.put("pnl", pnl);
         v.put("closed_at", System.currentTimeMillis());
-        v.put("status", "RECONCILE_PENDING");
-        v.put("close_reason", reason == null ? "UNKNOWN" : reason);
-        v.put("cost_state", "UNVERIFIED");
-        v.put("close_detail", "Legacy close estimate; requires exchange fills");
+        v.put("status", reason == null ? "CLOSED" : reason);
         getWritableDatabase().update("trades", v, "id=?", new String[]{String.valueOf(id)});
     }
 
@@ -182,10 +113,7 @@ public final class Journal extends SQLiteOpenHelper {
         List<Trade> out = new ArrayList<Trade>();
         Cursor c = getReadableDatabase().rawQuery(
                 "SELECT id,env,symbol,side,leverage,margin_mode,entry,exit,qty,notional,"
-                        + "sl,tp,pnl,protection,opened_at,closed_at,status,note,"
-                        + "entry_order_id,client_id,position_side,account_key,stop_order_id,target_order_id,"
-                        + "gross_pnl,commission,funding,fee_assets,cost_state,close_reason,close_detail,"
-                        + "exit_order_ids,initial_risk,strategy_key,signal_price,requested_close_id,requested_close_reason,requested_close_client FROM trades "
+                        + "sl,tp,pnl,protection,opened_at,closed_at,status,note FROM trades "
                         + "WHERE env=? ORDER BY id DESC LIMIT " + Math.max(1, limit),
                 new String[]{env});
         while (c.moveToNext()) {
@@ -208,15 +136,6 @@ public final class Journal extends SQLiteOpenHelper {
             t.closedAt = c.getLong(15);
             t.status = c.getString(16);
             t.note = c.getString(17);
-            t.entryOrderId=c.getLong(18); t.clientId=c.getString(19); t.positionSide=c.getString(20);
-            t.accountKey=c.getString(21); t.stopOrderId=c.getLong(22); t.targetOrderId=c.getLong(23);
-            t.grossPnl=c.isNull(24)?Double.NaN:c.getDouble(24);
-            t.commission=c.isNull(25)?Double.NaN:c.getDouble(25);
-            t.funding=c.isNull(26)?Double.NaN:c.getDouble(26); t.feeAssets=c.getString(27);
-            t.costState=c.getString(28); t.closeReason=c.getString(29); t.closeDetail=c.getString(30);
-            t.exitOrderIds=c.getString(31); t.initialRisk=c.getDouble(32); t.strategyKey=c.getString(33);
-            t.signalPrice=c.getDouble(34); t.requestedCloseId=c.getLong(35); t.requestedCloseReason=c.getString(36);
-            t.requestedCloseClient=c.getString(37);
             out.add(t);
         }
         c.close();
@@ -228,7 +147,7 @@ public final class Journal extends SQLiteOpenHelper {
         Cursor c = getReadableDatabase().rawQuery(
                 "SELECT SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END),"
                         + " SUM(CASE WHEN pnl<=0 THEN 1 ELSE 0 END),"
-                        + " COALESCE(SUM(pnl),0) FROM trades WHERE env=? AND closed_at>0 AND cost_state IN ('CONFIRMED','SIMULATED')",
+                        + " COALESCE(SUM(pnl),0) FROM trades WHERE env=? AND status!='OPEN'",
                 new String[]{env});
         double w = 0, l = 0, net = 0;
         if (c.moveToFirst()) {
@@ -292,13 +211,12 @@ public final class Journal extends SQLiteOpenHelper {
 
     /** Net realised P/L since midnight, for the daily-loss stop. */
     public double todayPnl(String env) {
-        java.util.Calendar cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"));
+        java.util.Calendar cal = java.util.Calendar.getInstance();
         cal.set(java.util.Calendar.HOUR_OF_DAY, 0);
         cal.set(java.util.Calendar.MINUTE, 0);
         cal.set(java.util.Calendar.SECOND, 0);
-        cal.set(java.util.Calendar.MILLISECOND, 0);
         Cursor c = getReadableDatabase().rawQuery(
-                "SELECT COALESCE(SUM(pnl),0) FROM trades WHERE env=? AND closed_at>0 AND cost_state IN ('CONFIRMED','SIMULATED') "
+                "SELECT COALESCE(SUM(pnl),0) FROM trades WHERE env=? AND status!='OPEN' "
                         + "AND closed_at>=?",
                 new String[]{env, String.valueOf(cal.getTimeInMillis())});
         double p = c.moveToFirst() ? c.getDouble(0) : 0;
@@ -309,7 +227,7 @@ public final class Journal extends SQLiteOpenHelper {
     /** How many losses in a row, most recent first. */
     public int consecutiveLosses(String env) {
         Cursor c = getReadableDatabase().rawQuery(
-                "SELECT pnl FROM trades WHERE env=? AND closed_at>0 AND cost_state IN ('CONFIRMED','SIMULATED') ORDER BY id DESC LIMIT 20",
+                "SELECT pnl FROM trades WHERE env=? AND status!='OPEN' ORDER BY id DESC LIMIT 20",
                 new String[]{env});
         int run = 0;
         while (c.moveToNext()) {
@@ -329,24 +247,6 @@ public final class Journal extends SQLiteOpenHelper {
         getWritableDatabase().execSQL(
                 "DELETE FROM errors WHERE id NOT IN "
                         + "(SELECT id FROM errors ORDER BY id DESC LIMIT 500)");
-    }
-
-    public String exportEvidence(String env) throws Exception {
-        org.json.JSONObject report=new org.json.JSONObject();
-        report.put("version",Readiness.MODEL_VERSION);report.put("environment",env);
-        report.put("exported_at",System.currentTimeMillis());
-        report.put("note","Unverified historical rows are not proof of P/L or exit cause. No API keys are exported.");
-        for(String table:new String[]{"trades","events","errors"}) {
-            org.json.JSONArray rows=new org.json.JSONArray();
-            Cursor c=getReadableDatabase().rawQuery("SELECT * FROM "+table+" WHERE env=? ORDER BY id",new String[]{env});
-            try{while(c.moveToNext()) {
-                org.json.JSONObject row=new org.json.JSONObject();
-                for(int i=0;i<c.getColumnCount();i++)row.put(c.getColumnName(i),c.isNull(i)?org.json.JSONObject.NULL:c.getString(i));
-                rows.put(row);
-            }}finally{c.close();}
-            report.put(table,rows);
-        }
-        return report.toString(2);
     }
 
     public static String when(long millis) {

@@ -17,7 +17,7 @@ import java.util.Set;
  * are the same ones the desktop enforces in core/trading_preferences.py:
  *
  *   - SPOT is buy-only: leverage forced to 1x, shorting impossible.
- *   - Leverage is snapped to the supported ladder.
+ *   - Leverage is snapped to the exchange ladder and capped harder on LIVE.
  *   - At least one direction always stays enabled.
  */
 public final class Settings {
@@ -31,7 +31,7 @@ public final class Settings {
     public static final int[] SCAN_INTERVALS = {5, 10, 15, 30, 60, 120, 300};
 
     /** Share of available balance committed as margin per trade. */
-    public static final int[] SIZE_PERCENTS = {5, 10, 25, 50, 75, 100};
+    public static final int[] SIZE_PERCENTS = {10, 25, 50, 75, 100};
 
     public static String intervalLabel(int seconds) {
         if (seconds < 60) return seconds + "s";
@@ -39,29 +39,32 @@ public final class Settings {
         return (seconds / 3600) + "h";
     }
 
-    /** All integer settings are available for local PAPER simulation only. */
+    /** Hard ceiling per environment. LIVE is deliberately below the ladder. */
     public static int maxLeverage(String env) {
-        return "PAPER".equals(env) ? 150 : ("DEMO".equals(env) ? 3 : 1);
+        // 20x is available on every environment. At 20x roughly a 5% adverse
+        // move liquidates the position, so the default stays at 10x.
+        return 20;
     }
 
     private static final String PREFS = "falcon_env";
 
     public final String env;
     public String tradingMode = "FUTURES";
-    public int leverage = 1;
-    public String marginMode = "ISOLATED";
+    public int leverage = 10;
+    public String marginMode = "CROSS";
     public boolean allowLong = true;
     public boolean allowShort = true;
-    /** Experimental: invert finalized new-entry directions, never existing positions or exits. */
-    public boolean reverseTradeDirection = false;
-    public double riskPercent = 0.25;
-    public double dailyLossPercent = 1.0;
-    public double feeBps = 5.0, slippageBps = 2.0;
-    public String entryPolicy = "BASELINE";
-    public String exitPolicy = "LEGACY";
+    public boolean reverseEntries;
+    public double riskPercent = 2.0;
     /** Percent of available balance used as margin for one trade. */
-    public int sizePercent = 10;
-    /** Legacy preference retained for migration; forced off in this audit. */
+    public int sizePercent = 25;
+    /**
+     * Let Falcon hold the stop itself when Binance refuses one.
+     *
+     * Off by default: an exchange stop lives on Binance's servers and fires
+     * whatever happens to this phone. A Falcon-side stop only fires while
+     * the app is running with network, so it is a deliberate trade-off.
+     */
     public boolean managedStop = false;
     /** Notify when a position opens. */
     public boolean notifyOpen = true;
@@ -76,7 +79,7 @@ public final class Settings {
     /** Stop trading for the day after this much loss, in USDT. 0 = off. */
     public double maxDailyLoss = 0;
     /** Stop trading after this many losses in a row. 0 = off. */
-    public int maxConsecutiveLosses = 3;
+    public int maxConsecutiveLosses = 0;
     /**
      * Only the stop and the target may close a position.
      *
@@ -85,17 +88,32 @@ public final class Settings {
      * where the idea is wrong.
      */
     public boolean exitOnlyBySlTp = true;
-    /** Legacy fallback controls are disabled by validated(). */
+    /**
+     * Interrupt with a dialog when Binance will not accept a stop order.
+     *
+     * Off by default: this account rejects exchange stops every time, so
+     * the prompt appeared on every entry and answered the same way. The
+     * fallback is used automatically instead, and the position card still
+     * shows which kind of stop is holding the trade.
+     */
     public boolean askBeforeFalconStop = false;
+    /**
+     * Falcon never sends a close order. Ever.
+     *
+     * Off by default, and deliberately so. When Binance accepts an exchange
+     * stop this changes nothing useful, because the stop already lives on
+     * the exchange. When Binance refuses one - as this account currently
+     * does - turning this on means the position has NO stop at all.
+     */
     public boolean neverCloseByFalcon = false;
-    public int maxPositions = 1;
+    public int maxPositions = 3;
     public String timeframe = "15m";
     public boolean autoTrade = false;
     public boolean customWatchlist = false;
     public List<String> watchlist = new ArrayList<String>();
     public int scanLimit = 12;
     /** Seconds between automatic scan cycles when continuous scanning is on. */
-    public int scanIntervalSec = 30;
+    public int scanIntervalSec = 5;
 
     private Settings(String env) {
         this.env = env;
@@ -109,24 +127,19 @@ public final class Settings {
         SharedPreferences p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         Settings s = new Settings(env);
         s.tradingMode = p.getString(key(env, "mode"), "FUTURES");
-        s.leverage = p.getInt(key(env, "lev"), 1);
-        s.marginMode = p.getString(key(env, "margin"), "ISOLATED");
+        s.leverage = p.getInt(key(env, "lev"), 10);
+        s.marginMode = p.getString(key(env, "margin"), "CROSS");
         s.allowLong = p.getBoolean(key(env, "long"), true);
+        s.reverseEntries = p.getBoolean(key(env, "reverseEntries"), false);
         s.allowShort = p.getBoolean(key(env, "short"), true);
-        s.reverseTradeDirection = p.getBoolean(key(env, "reverse_entries"), false);
-        s.riskPercent = p.getFloat(key(env, "risk_v2"), 0.25f);
-        s.dailyLossPercent = p.getFloat(key(env,"daily_pct"),1f);
-        s.feeBps = p.getFloat(key(env,"fee_bps"),5f);
-        s.slippageBps = p.getFloat(key(env,"slip_bps"),2f);
-        s.entryPolicy = p.getString(key(env,"entry_policy"),"BASELINE");
-        s.exitPolicy = p.getString(key(env,"exit_policy"),"LEGACY");
-        s.maxPositions = p.getInt(key(env, "maxpos"), 1);
+        s.riskPercent = p.getFloat(key(env, "risk"), 2.0f);
+        s.maxPositions = p.getInt(key(env, "maxpos"), 3);
         s.timeframe = p.getString(key(env, "tf"), "15m");
         s.autoTrade = p.getBoolean(key(env, "auto"), false);
         s.customWatchlist = p.getBoolean(key(env, "cwl"), false);
         s.scanLimit = p.getInt(key(env, "scanlimit"), 12);
-        s.scanIntervalSec = p.getInt(key(env, "scaninterval"), 30);
-        s.sizePercent = p.getInt(key(env, "sizepct"), 10);
+        s.scanIntervalSec = p.getInt(key(env, "scaninterval"), 5);
+        s.sizePercent = p.getInt(key(env, "sizepct"), 25);
         s.managedStop = p.getBoolean(key(env, "managedstop"), false);
         s.notifyOpen = p.getBoolean(key(env, "notifyopen"), true);
         s.notifyClose = p.getBoolean(key(env, "notifyclose"), true);
@@ -134,7 +147,7 @@ public final class Settings {
         s.tradingStyle = p.getString(key(env, "style"), "NORMAL");
         s.requireConfirmation = p.getBoolean(key(env, "confirm"), false);
         s.maxDailyLoss = p.getFloat(key(env, "maxdailyloss"), 0f);
-        s.maxConsecutiveLosses = p.getInt(key(env, "maxlosses"), 3);
+        s.maxConsecutiveLosses = p.getInt(key(env, "maxlosses"), 0);
         s.exitOnlyBySlTp = p.getBoolean(key(env, "exitslonly"), true);
         s.askBeforeFalconStop = p.getBoolean(key(env, "askfalconstop"), false);
         s.neverCloseByFalcon = p.getBoolean(key(env, "nevercl"), false);
@@ -157,14 +170,9 @@ public final class Settings {
         e.putInt(key(env, "lev"), leverage);
         e.putString(key(env, "margin"), marginMode);
         e.putBoolean(key(env, "long"), allowLong);
+        e.putBoolean(key(env, "reverseEntries"), reverseEntries);
         e.putBoolean(key(env, "short"), allowShort);
-        e.putBoolean(key(env, "reverse_entries"), reverseTradeDirection);
-        e.putFloat(key(env, "risk_v2"), (float) riskPercent);
-        e.putFloat(key(env,"daily_pct"),(float)dailyLossPercent);
-        e.putFloat(key(env,"fee_bps"),(float)feeBps);
-        e.putFloat(key(env,"slip_bps"),(float)slippageBps);
-        e.putString(key(env,"entry_policy"),entryPolicy);
-        e.putString(key(env,"exit_policy"),exitPolicy);
+        e.putFloat(key(env, "risk"), (float) riskPercent);
         e.putInt(key(env, "maxpos"), maxPositions);
         e.putString(key(env, "tf"), timeframe);
         e.putBoolean(key(env, "auto"), autoTrade);
@@ -195,8 +203,7 @@ public final class Settings {
     /** Apply every safety rule. Called on load and before every save. */
     public Settings validated() {
         if (!"FUTURES".equals(tradingMode)) tradingMode = "SPOT";
-        // Testnet position risk must not spill into unrelated isolated positions.
-        if ("DEMO".equals(env) || !"CROSS".equals(marginMode)) marginMode = "ISOLATED";
+        if (!"CROSS".equals(marginMode)) marginMode = "ISOLATED";
 
         if ("SPOT".equals(tradingMode)) {
             // Spot is buy-only. No leverage, no shorting, margin irrelevant.
@@ -204,50 +211,33 @@ public final class Settings {
             allowLong = true;
             allowShort = false;
         } else {
-            if ("PAPER".equals(env)) {
-                // No exchange requests, no real funds: exact 1x–150x whole-number simulation.
-                leverage = Math.max(1, Math.min(maxLeverage(env), leverage));
-            } else {
-                // Existing exchange DEMO limit and LIVE safeguards remain unchanged.
-                int ceiling = maxLeverage(env);
-                int snapped = 1;
-                for (int i = 0; i < LEVERAGE_LADDER.length; i++) {
-                    int rung = LEVERAGE_LADDER[i];
-                    if (rung <= ceiling && rung <= leverage) snapped = rung;
-                }
-                leverage = snapped;
+            int ceiling = maxLeverage(env);
+            int snapped = 1;
+            for (int i = 0; i < LEVERAGE_LADDER.length; i++) {
+                int rung = LEVERAGE_LADDER[i];
+                if (rung <= ceiling && rung <= leverage) snapped = rung;
             }
+            leverage = snapped;
             // Both directions off would freeze the engine.
             if (!allowLong && !allowShort) allowLong = true;
         }
 
-        riskPercent = bounded(riskPercent, 0.1, 0.5, 0.25);
-        dailyLossPercent = bounded(dailyLossPercent, 0.25, 2.0, 1.0);
-        feeBps = bounded(feeBps, 1, 30, 5);
-        slippageBps = bounded(slippageBps, 1, 100, 2);
-        if (!"PULLBACK".equals(entryPolicy)) entryPolicy="BASELINE";
-        if (!Arrays.asList("LEGACY","FIXED","EARLY","TRAIL").contains(exitPolicy)) exitPolicy="LEGACY";
-        if (Double.isNaN(maxDailyLoss) || Double.isInfinite(maxDailyLoss) || maxDailyLoss<0) maxDailyLoss=0;
-        // The audit build requires exchange protection for every new real/testnet trade.
-        managedStop=false; neverCloseByFalcon=false; askBeforeFalconStop=false;
+        riskPercent = Indicators.clamp(riskPercent, 0.25, "LIVE".equals(env) ? 5.0 : 10.0);
         if (maxPositions < 1) maxPositions = 1;
-        if (maxPositions > ("PAPER".equals(env) ? 10 : 2))
-            maxPositions = "PAPER".equals(env) ? 10 : 2;
-        if (maxConsecutiveLosses < 1) maxConsecutiveLosses = 3;
-        if (maxConsecutiveLosses > 10) maxConsecutiveLosses = 10;
+        if (maxPositions > 10) maxPositions = 10;
         if (scanLimit < 5) scanLimit = 5;
         if (scanLimit > 30) scanLimit = 30;
         // A floor of 30s keeps Falcon well inside Binance's request weight
         // limits even with a full watchlist.
         // 5s floor: at 12 symbols this is ~288 request weight per minute,
         // under 5% of Binance's 6000/min budget.
-        if (scanIntervalSec < 15) scanIntervalSec = 15;
+        if (scanIntervalSec < 5) scanIntervalSec = 5;
         if (scanIntervalSec > 3600) scanIntervalSec = 3600;
-        int pct = 10;
+        int pct = 25;
         for (int i = 0; i < SIZE_PERCENTS.length; i++) {
             if (SIZE_PERCENTS[i] == sizePercent) pct = sizePercent;
         }
-        sizePercent = "DEMO".equals(env) ? Math.min(pct, 25) : pct;
+        sizePercent = pct;
         boolean knownStyle = false;
         for (int i = 0; i < Momentum.STYLES.length; i++) {
             if (Momentum.STYLES[i].equals(tradingStyle)) knownStyle = true;
@@ -280,23 +270,18 @@ public final class Settings {
         return s;
     }
 
-    private static double bounded(double v,double lo,double hi,double fallback) {
-        return Double.isNaN(v)||Double.isInfinite(v)?fallback:Math.max(lo,Math.min(hi,v));
-    }
     public boolean isFutures() {
         return "FUTURES".equals(tradingMode);
     }
 
     /** Human-readable summary for the header. */
     public String describe() {
-        if (!isFutures()) return "SPOT · buy only · no leverage"
-                + (reverseTradeDirection ? " · reverse mode blocked in SPOT" : "");
+        if (!isFutures()) return "SPOT · buy only · no leverage";
         StringBuilder sb = new StringBuilder("FUTURES · ");
         sb.append(leverage).append("x · ").append(marginMode).append(" · ");
         if (allowLong && allowShort) sb.append("LONG/SHORT");
         else if (allowLong) sb.append("LONG only");
         else sb.append("SHORT only");
-        if (reverseTradeDirection) sb.append(" · REVERSE ON");
         return sb.toString();
     }
 

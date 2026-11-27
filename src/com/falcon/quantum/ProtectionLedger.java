@@ -44,9 +44,7 @@ public final class ProtectionLedger {
         public String id;
         public long stopId;
         public long targetId;
-        public long placedAt, verifiedAt;
-        public double stopPrice,targetPrice;
-        public String state="UNVERIFIED";
+        public long placedAt;
 
         public boolean hasStop() {
             return stopId > 0;
@@ -75,24 +73,10 @@ public final class ProtectionLedger {
         } catch (Exception e) {
             return null;
         }
-        r.stopPrice=Double.longBitsToDouble(p.getLong(id+"_sl",0));
-        r.targetPrice=Double.longBitsToDouble(p.getLong(id+"_tp",0));
-        r.verifiedAt=p.getLong(id+"_verified",0);r.state=p.getString(id+"_state","UNVERIFIED");
         return r;
     }
 
-    public static synchronized void exact(Context ctx,String id,long stop,long target,double sl,double tp,String state) {
-        SharedPreferences p=prefs(ctx);
-        Set<String> ids=new HashSet<String>(p.getStringSet(INDEX,new HashSet<String>()));ids.add(id);
-        if(!p.edit().putString(id,stop+","+target+","+System.currentTimeMillis()).putStringSet(INDEX,ids)
-            .putLong(id+"_sl",Double.doubleToLongBits(sl)).putLong(id+"_tp",Double.doubleToLongBits(tp))
-            .putLong(id+"_verified",System.currentTimeMillis()).putString(id+"_state",state).commit())
-            throw new IllegalStateException("Could not save verified protection");
-    }
-    public static void state(Context ctx,String id,String state,long verified) {
-        prefs(ctx).edit().putString(id+"_state",state).putLong(id+"_verified",verified).commit();
-    }
-    public static synchronized void put(Context ctx, String id, long stopId, long targetId) {
+    public static void put(Context ctx, String id, long stopId, long targetId) {
         SharedPreferences p = prefs(ctx);
         Record existing = get(ctx, id);
         long stop = stopId > 0 ? stopId : (existing == null ? 0 : existing.stopId);
@@ -106,12 +90,11 @@ public final class ProtectionLedger {
                 .apply();
     }
 
-    public static synchronized void remove(Context ctx, String id) {
+    public static void remove(Context ctx, String id) {
         SharedPreferences p = prefs(ctx);
         Set<String> index = new HashSet<String>(p.getStringSet(INDEX, new HashSet<String>()));
         index.remove(id);
-        p.edit().remove(id).remove(id+"_pending_sl").remove(id+"_pending_tp").remove(id+"_sl").remove(id+"_tp")
-                .remove(id+"_state").remove(id+"_verified").putStringSet(INDEX,index).commit();
+        p.edit().remove(id).putStringSet(INDEX, index).apply();
     }
 
     /** Every record currently held, used to find ones with no position left. */

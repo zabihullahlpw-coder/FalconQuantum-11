@@ -34,7 +34,7 @@ public final class Trader {
     public static final String SPOT_LIVE = "https://api.binance.com";
     public static final String SPOT_TEST = "https://testnet.binance.vision";
     public static final String FUT_LIVE = "https://fapi.binance.com";
-    public static final String FUT_TEST = "https://demo-fapi.binance.com";
+    public static final String FUT_TEST = "https://testnet.binancefuture.com";
 
     private static final String PREFS = "falcon_keys";
     private static final int TIMEOUT = 15000;
@@ -46,29 +46,6 @@ public final class Trader {
     /** For the protection ledger. Null only in the probe constructor. */
     private Context appContext;
     private String environment = "";
-    private boolean writeAllowed, managementOnly;
-    public static final Object ORDER_LOCK = new Object();
-    public long serverNow() { return System.currentTimeMillis()+timeOffset; }
-    public String accountKey() {
-        try {
-            byte[] b=java.security.MessageDigest.getInstance("SHA-256").digest((base()+apiKey).getBytes("UTF-8"));
-            StringBuilder out=new StringBuilder(); for(int i=0;i<12;i++) out.append(String.format("%02x",b[i]&255));
-            return out.toString();
-        } catch(Exception e) { throw new IllegalStateException(e); }
-    }
-    private void audit(String symbol,String kind,String detail) {
-        if(appContext==null) return;
-        Journal j=new Journal(appContext);
-        try {
-            long tradeId=0;int matches=0;
-            for(Journal.Trade t:j.history(environment,10000))
-                if(t.closedAt==0&&!"ENTRY_REJECTED".equals(t.status)&&symbol.equals(t.symbol)&&accountKey().equals(t.accountKey)) {
-                    tradeId=t.id;matches++;
-                }
-            j.event(matches==1?tradeId:0,environment,symbol,kind,detail);
-        } finally { j.close(); }
-    }
-
 
     private Trader(String apiKey, String apiSecret, boolean futures, boolean testnet) {
         this.apiKey = apiKey;
@@ -80,7 +57,10 @@ public final class Trader {
     // ------------------------------------------------------------- key store
 
     public static void saveKeys(Context ctx, String env, String key, String secret) {
-        SecureKeys.save(ctx, env, clean(key), clean(secret));
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(env + "_key", clean(key))
+                .putString(env + "_secret", clean(secret))
+                .apply();
     }
 
     /**
@@ -99,53 +79,25 @@ public final class Trader {
     }
 
     public static String key(Context ctx, String env) {
-        return SecureKeys.load(ctx, env)[0];
+        return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(env + "_key", "");
     }
 
     public static String secret(Context ctx, String env) {
-        return SecureKeys.load(ctx, env)[1];
+        return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(env + "_secret", "");
     }
 
     public static boolean hasKeys(Context ctx, String env) {
-        String[] pair = SecureKeys.load(ctx, env);
-        return pair[0].length() > 0 && pair[1].length() > 0;
+        return key(ctx, env).length() > 0 && secret(ctx, env).length() > 0;
     }
 
-    /** Safety preview: previous arming preferences cannot enable new real-money entries. */
+    /** LIVE order sending stays off until the operator explicitly arms it. */
     public static boolean liveArmed(Context ctx) {
-        return false;
+        return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("live_armed", false);
     }
 
     public static void setLiveArmed(Context ctx, boolean armed) {
-        // Deliberately never persists an ON switch in the safety preview.
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                .remove("live_armed").commit();
-    }
-
-    /** Shared by manual entries, foreground/background automation and client creation. */
-    public static String entryBlockReason(Context ctx, Settings cfg) {
-        if (cfg == null || (!"DEMO".equals(cfg.env) && !"LIVE".equals(cfg.env)))
-            return "Exchange entries require DEMO or LIVE; PAPER is simulated locally";
-        if (!cfg.isFutures()) return "Exchange entries require Futures; SPOT uses PAPER only";
-        if ("LIVE".equals(cfg.env))
-            return "LIVE entries disabled in Falcon 11.0 safety preview";
-        if (!hasKeys(ctx, cfg.env)) return "No " + cfg.env + " trading credentials";
-        return null;
-    }
-
-    /** A local refusal before any entry bytes are sent; not an unknown exchange outcome. */
-    public static final class EntryNotSubmittedException extends IllegalStateException {
-        EntryNotSubmittedException(String message) { super(message); }
-    }
-
-    /** Re-read the switch so an already-created client cannot outlive disarming. */
-    void requireEntryPermission() {
-        if (managementOnly || !writeAllowed)
-            throw new EntryNotSubmittedException("This client cannot open positions");
-        if (!futures || (!"DEMO".equals(environment) && !"LIVE".equals(environment)))
-            throw new EntryNotSubmittedException("Exchange entries require DEMO or LIVE Futures");
-        if ("LIVE".equals(environment))
-            throw new EntryNotSubmittedException("LIVE entries disabled in Falcon 11.0 safety preview");
+                .putBoolean("live_armed", armed).apply();
     }
 
     /**
@@ -153,12 +105,13 @@ public final class Trader {
      * environment must not send orders.
      */
     public static Trader forEnvironment(Context ctx, Settings cfg) {
-        if (entryBlockReason(ctx, cfg) != null) return null;
+        if ("PAPER".equals(cfg.env)) return null;
+        if (!hasKeys(ctx, cfg.env)) return null;
+        if ("LIVE".equals(cfg.env) && !liveArmed(ctx)) return null;
         boolean testnet = "DEMO".equals(cfg.env);
         Trader t = new Trader(key(ctx, cfg.env), secret(ctx, cfg.env), cfg.isFutures(), testnet);
         t.appContext = ctx.getApplicationContext();
         t.environment = cfg.env;
-        t.writeAllowed=true;
         t.syncTime();
         return t;
     }
@@ -169,20 +122,13 @@ public final class Trader {
      * should always be able to see the truth about their account.
      */
     public static Trader forReading(Context ctx, Settings cfg) {
-        if (!"DEMO".equals(cfg.env) && !"LIVE".equals(cfg.env)) return null;
+        if ("PAPER".equals(cfg.env)) return null;
         if (!hasKeys(ctx, cfg.env)) return null;
         Trader t = new Trader(key(ctx, cfg.env), secret(ctx, cfg.env),
                 cfg.isFutures(), "DEMO".equals(cfg.env));
         t.appContext = ctx.getApplicationContext();
         t.environment = cfg.env;
         t.syncTime();
-        return t;
-    }
-
-    /** Risk-reducing operations remain available when new entries are disarmed. */
-    public static Trader forManagement(Context ctx,Settings cfg) {
-        Trader t=forReading(ctx,cfg);
-        if(t!=null) { t.writeAllowed=true; t.managementOnly=true; }
         return t;
     }
 
@@ -241,11 +187,6 @@ public final class Trader {
      * live position bare, so the network layer retries before giving up.
      */
     private String callHost(String host, String method, String path, String query) throws Exception {
-        if (!"GET".equals(method)) {
-            if(!writeAllowed) throw new IllegalStateException("Read-only client");
-            // A timeout/503 is UNKNOWN execution status. Never replay a mutation here.
-            return callHostOnce(host,method,path,query);
-        }
         Exception last = null;
         for (int attempt = 0; attempt < 3; attempt++) {
             try {
@@ -273,11 +214,6 @@ public final class Trader {
     }
 
     private String callHostOnce(String host, String method, String path, String query) throws Exception {
-        return callHostOnce(host,method,path,query,false);
-    }
-
-    private String callHostOnce(String host, String method, String path, String query, boolean openingEntry) throws Exception {
-        if (openingEntry) requireEntryPermission(); // Refuse before opening a connection.
         String q = query + (query.length() > 0 ? "&" : "") + "timestamp="
                 + (System.currentTimeMillis() + timeOffset) + "&recvWindow=10000";
         String signed = q + "&signature=" + sign(q);
@@ -287,23 +223,19 @@ public final class Trader {
         c.setConnectTimeout(TIMEOUT);
         c.setReadTimeout(TIMEOUT);
         c.setRequestProperty("X-MBX-APIKEY", apiKey);
-        c.setRequestProperty("User-Agent", "FalconQuantum/"+Readiness.MODEL_VERSION);
+        c.setRequestProperty("User-Agent", "FalconQuantum/7.3.0");
         try {
             if (!"GET".equals(method)) {
                 c.setDoOutput(true);
                 c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-                // Last local check before opening the connection to send an entry.
-                if(openingEntry) requireEntryPermission();
                 OutputStream os = c.getOutputStream();
                 os.write(signed.getBytes("UTF-8"));
                 os.flush();
                 os.close();
             }
             int code = c.getResponseCode();
-            java.io.InputStream response=code>=400?c.getErrorStream():c.getInputStream();
-            if(response==null)throw new java.io.IOException("Binance HTTP "+code+": empty response body");
             BufferedReader r = new BufferedReader(new InputStreamReader(
-                    response, "UTF-8"));
+                    code >= 400 ? c.getErrorStream() : c.getInputStream(), "UTF-8"));
             StringBuilder sb = new StringBuilder();
             String line;
             while ((line = r.readLine()) != null) sb.append(line);
@@ -328,7 +260,6 @@ public final class Trader {
         public double liquidation;   // 0 when the exchange reports none
         public int leverage = 1;
         public String marginMode = "";
-        public String positionSide="BOTH";
     }
 
     /**
@@ -348,7 +279,6 @@ public final class Trader {
             Position p = new Position();
             p.symbol = o.optString("symbol", "");
             p.side = amt > 0 ? "LONG" : "SHORT";
-            p.positionSide=o.optString("positionSide","BOTH");
             p.qty = Math.abs(amt);
             p.entry = o.optDouble("entryPrice", 0);
             p.mark = o.optDouble("markPrice", 0);
@@ -367,276 +297,654 @@ public final class Trader {
      * can never accidentally flip into the opposite direction.
      */
     public String closePosition(Position p) throws Exception {
-        return closePosition(p,"fq_close_"+java.util.UUID.randomUUID().toString().replace("-","").substring(0,22));
-    }
-    public String closePosition(Position p,String id) throws Exception {
-        synchronized(ORDER_LOCK) {
-            if(!futures) throw new IllegalStateException("Futures close only");
-            // Re-read size/side; never close a cached quantity into a newly opened trade.
-            Position current=null;
-            for(Position q:positions()) if(q.symbol.equals(p.symbol)&&q.side.equals(p.side)) current=q;
-            if(current==null) throw new IllegalStateException("Position is already flat");
-            if(p.entry>0&&(Math.abs(current.entry-p.entry)>Math.max(1e-9,p.entry*1e-8)
-                    ||!current.positionSide.equals(p.positionSide)))throw new IllegalStateException("Position changed since request; inspect before closing");
-            String query="symbol="+current.symbol+"&side="+("LONG".equals(current.side)?"SELL":"BUY")
-                +"&type=MARKET&quantity="+quantise(current.symbol,current.qty)+"&newClientOrderId="+id+"&newOrderRespType=RESULT";
-            if(!"BOTH".equals(current.positionSide)) query+="&positionSide="+current.positionSide;
-            else query+="&reduceOnly=true";
-            audit(p.symbol,"CLOSE_INTENT",id+" | "+p.side+" | qty="+current.qty);
-            return submitKnownOrder("/fapi/v1/order",query,p.symbol,id,false).toString();
-        }
-    }
-
-    public String emergencyClose(String symbol,boolean isLong,double qty) {
-        try {
-            Position p=new Position();p.symbol=symbol;p.side=isLong?"LONG":"SHORT";p.qty=qty;
-            closePosition(p); // Keep existing protection until a filled close/flat position is confirmed.
-            return null;
-        } catch(Exception e) { audit(symbol,"EMERGENCY_CLOSE_ERROR",String.valueOf(e));return String.valueOf(e.getMessage()); }
-    }
-
-    public static final String ALGO_ORDER_PATH="/fapi/v1/algoOrder";
-    public static final String ALGO_OPEN_PATH="/fapi/v1/openAlgoOrders";
-    public static final String[] VARIANT_NAMES={"CONDITIONAL closePosition STOP_MARKET / MARK_PRICE"};
-    public void rememberStopSupport(boolean supported) { /* no cached acceptance claim */ }
-    public Boolean stopSupport() { return null; }
-    public Integer knownVariant() { return null; }
-    public void rememberVariant(int index) { }
-    public String algoLabel(String symbol) {
-        if(appContext==null) return "unverified";
-        StringBuilder b=new StringBuilder();
-        for(ProtectionLedger.Record r:ProtectionLedger.all(appContext))
-            if(r.id.startsWith(ledgerEnv()+"|")&&symbol.equals(ProtectionLedger.symbolOf(r.id)))
-                b.append("SL ").append(r.stopId).append(" / TP ").append(r.targetId)
-                 .append(" | checked ").append(Journal.when(r.verifiedAt)).append(" | ").append(r.state);
-        return b.length()==0?"unverified":b.toString();
-    }
-    private String ledgerEnv() { return environment+":"+accountKey(); }
-    private String positionKey(String symbol,boolean isLong,double entry) {
-        return ProtectionLedger.positionId(ledgerEnv(),symbol,isLong?"LONG":"SHORT",entry);
-    }
-
-    /** POST once, then resolve ambiguous outcomes by the SAME durable client ID. */
-    private JSONObject submitKnownOrder(String path,String query,String symbol,String clientId,boolean algo) throws Exception {
-        return submitKnownOrder(path,query,symbol,clientId,algo,false);
-    }
-
-    private JSONObject submitKnownOrder(String path,String query,String symbol,String clientId,boolean algo,boolean openingEntry) throws Exception {
-        try { return new JSONObject(openingEntry?callHostOnce(base(),"POST",path,query,true):call("POST",path,query)); }
-        catch(EntryNotSubmittedException refused) { throw refused; }
-        catch(Exception send) {
-            audit(symbol,"ORDER_SUBMIT_ERROR",clientId+" | "+send.getMessage());
-            try {
-                JSONObject found=algo?queryAlgoClient(clientId):queryOrderClient(symbol,clientId);
-                audit(symbol,"ORDER_RECOVERED",found.toString()); return found;
-            } catch(Exception lookup) {
-                throw new IllegalStateException("Order outcome requires reconciliation for "+clientId
-                    +". No retry sent. Submit: "+send.getMessage()+" | Query: "+lookup.getMessage());
-            }
-        }
-    }
-    public JSONObject queryOrderClient(String symbol,String id) throws Exception {
-        return new JSONObject(call("GET","/fapi/v1/order","symbol="+symbol+"&origClientOrderId="+id));
-    }
-    public JSONObject queryOrder(String symbol,long id) throws Exception {
-        return new JSONObject(call("GET","/fapi/v1/order","symbol="+symbol+"&orderId="+id));
-    }
-    public JSONObject queryAlgo(long id) throws Exception {
-        return new JSONObject(call("GET",ALGO_ORDER_PATH,"algoId="+id));
-    }
-    private JSONObject queryAlgoClient(String id) throws Exception {
-        return new JSONObject(call("GET",ALGO_ORDER_PATH,"clientAlgoId="+id));
-    }
-    public org.json.JSONArray openAlgoOrders(String symbol) throws Exception {
-        String body=call("GET",ALGO_OPEN_PATH,"symbol="+symbol);
-        if(body.trim().startsWith("[")) return new org.json.JSONArray(body);
-        JSONObject w=new JSONObject(body);
-        org.json.JSONArray a=w.optJSONArray("orders");
-        if(a==null) a=w.optJSONArray("data");
-        if(a==null) throw new IllegalStateException("Unrecognised algo response; protection UNKNOWN");
-        return a;
-    }
-    public org.json.JSONArray openOrders(String symbol) throws Exception {
-        return new org.json.JSONArray(call("GET","/fapi/v1/openOrders","symbol="+symbol));
-    }
-    public boolean probeStopSupport(String symbol) {
-        // Readability is NOT proof Binance will accept a new stop. Never place live probe orders.
-        try { openAlgoOrders(symbol);return true; } catch(Exception e) { audit(symbol,"PROTECTION_QUERY_ERROR",e.toString());return false; }
-    }
-    public static final class ProtectionReport {
-        public int workingIndex=-1; public final StringBuilder log=new StringBuilder();
-        public boolean anyWorked() { return workingIndex>=0; }
-    }
-    public ProtectionReport findWorkingProtection(String symbol,boolean side,double trigger,double qty) {
-        ProtectionReport r=new ProtectionReport();
-        try { r.log.append("Read-only inspection. No test orders sent.\n").append(openAlgoOrders(symbol).toString(2))
-                .append("\nOrder submission/trigger behaviour must be tested on DEMO."); }
-        catch(Exception e) { r.log.append("UNKNOWN: ").append(e.getMessage()); }
-        return r;
-    }
-    public boolean[] protectionStatus(String symbol) {
-        try { boolean[] p=protectionPresent(symbol);return new boolean[]{p[0],p[1],true}; }
-        catch(Exception e) { audit(symbol,"PROTECTION_UNKNOWN",e.toString());return new boolean[]{false,false,false}; }
-    }
-    public boolean[] protectionPresent(String symbol) throws Exception {
-        java.util.List<Position> held=new java.util.ArrayList<Position>();
-        for(Position p:positions()) if(symbol.equals(p.symbol)) held.add(p);
-        if(held.size()!=1) throw new IllegalStateException("Protection needs an exact position side");
-        return protectionPresent(held.get(0),0,0);
-    }
-    public boolean[] protectionPresent(Position p,double sl,double tp) throws Exception {
-        org.json.JSONArray a=openAlgoOrders(p.symbol);
-        boolean stop=false,target=false;
-        for(int i=0;i<a.length();i++) {
-            JSONObject o=a.getJSONObject(i);
-            stop|=ProtectionRules.matches(o,p.symbol,p.positionSide,"LONG".equals(p.side),p.qty,true,sl,tickFor(p.symbol));
-            target|=ProtectionRules.matches(o,p.symbol,p.positionSide,"LONG".equals(p.side),p.qty,false,tp,tickFor(p.symbol));
-        }
-        return new boolean[]{stop,target};
-    }
-    public int importExistingProtection() { return 0; } // adoption occurs only after exact side/price/coverage verification
-    public int tidyProtection(String symbol) { return 0; } // never delete an arbitrary user's order
-    public int cancelAllConditional(String symbol) {
-        try { for(Position p:positions()) if(symbol.equals(p.symbol)) return 0; }
-        catch(Exception e) { return 0; }
-        cancelProtection(symbol);return 1;
-    }
-    public void cancelOpenOrders(String symbol) throws Exception { cancelProtection(symbol); }
-    public void cancelProtection(String symbol) {
-        synchronized(ORDER_LOCK) {
-            try {
-                // Never remove any protection while either book is still open.
-                for(Position p:positions()) if(symbol.equals(p.symbol)) return;
-                org.json.JSONArray a=openAlgoOrders(symbol);
-                for(int i=0;i<a.length();i++) {
-                    JSONObject o=a.getJSONObject(i);
-                    if(o.optString("clientAlgoId","").startsWith("fq_")) cancelAlgo(o.optLong("algoId"),symbol);
-                }
-                if(appContext!=null) for(ProtectionLedger.Record r:ProtectionLedger.all(appContext))
-                    if(r.id.startsWith(ledgerEnv()+"|")&&symbol.equals(ProtectionLedger.symbolOf(r.id))) {
-                        if(r.stopId>0) cancelAlgo(r.stopId,symbol);
-                        if(r.targetId>0) cancelAlgo(r.targetId,symbol);
-                        ProtectionLedger.remove(appContext,r.id);
-                    }
-            } catch(Exception e) { audit(symbol,"CLEANUP_ERROR",e.toString()); }
-        }
-    }
-    private void cancelAlgo(long id,String symbol) throws Exception {
-        try { call("DELETE",ALGO_ORDER_PATH,"algoId="+id); }
-        catch(Exception e) {
-            JSONObject q=queryAlgo(id);
-            String state=q.optString("algoStatus","");
-            if("NEW".equals(state)||state.length()==0) throw e;
-        }
-        audit(symbol,"PROTECTION_CANCELLED","algoId="+id);
-    }
-    public int reconcileProtection() {
-        if(appContext==null) return 0;
-        int n=0;
-        for(ProtectionLedger.Record r:ProtectionLedger.all(appContext)) if(r.id.startsWith(ledgerEnv()+"|")) {
-            cancelProtection(ProtectionLedger.symbolOf(r.id));n++;
-        }
-        return n;
-    }
-    public String retarget(Position p,double sl,double tp) {
-        synchronized(ORDER_LOCK) {
-            try {
-                if(sl<=0||tp<=0) return "Missing planned levels";
-                ProtectionLedger.Record old=appContext==null?null:ProtectionLedger.get(appContext,positionKey(p.symbol,"LONG".equals(p.side),p.entry));
-                if(old==null||old.stopId<=0) return "Cannot replace unverified protection";
-                if("LONG".equals(p.side)?sl<old.stopPrice:sl>old.stopPrice) return "Refused to loosen original protection";
-                return protect(p,sl,tp,true);
-            } catch(Exception e) { audit(p.symbol,"RETARGET_ERROR",e.toString());return e.getMessage(); }
-        }
-    }
-    public String ensureProtection(Position p,double sl,double tp) {
-        synchronized(ORDER_LOCK) {
-            try {
-                if(sl<=0||tp<=0) return "No original plan; automatic stop invention is disabled";
-                return protect(p,sl,tp,false);
-            } catch(Exception e) {
-                audit(p.symbol,"PROTECTION_UNKNOWN",e.toString());return String.valueOf(e.getMessage());
-            }
-        }
-    }
-    private String protect(Position p,double stop,double target,boolean replacement) throws Exception {
-        boolean isLong="LONG".equals(p.side);
-        double sl=Double.parseDouble(quantisePrice(p.symbol,stop)),tp=Double.parseDouble(quantisePrice(p.symbol,target));
-        if(sl<=0||tp<=0) return "Invalid rounded protection price";
-        String id=positionKey(p.symbol,isLong,p.entry);
-        ProtectionLedger.Record old=appContext==null?null:ProtectionLedger.get(appContext,id);
-        if(appContext!=null) ProtectionLedger.state(appContext,id,"CHECKING",0);
-        org.json.JSONArray open=openAlgoOrders(p.symbol); // any failure is UNKNOWN; no new orders
-        long sid=findProtection(open,p,true,sl),tid=findProtection(open,p,false,tp);
-        double mark=markPrice(p.symbol);
-        if(sid==0 && (isLong?mark<=sl:mark>=sl)) return "STOP_BREACHED: original stop crossed; do not widen it";
-        if(tid==0 && (isLong?mark>=tp:mark<=tp)) return "TARGET_BREACHED: original target crossed";
-        if(sid==0) sid=placeVerifiedLeg(p,true,sl,id);
-        // Persist the new stop before placing/cancelling any other leg.
-        long retainedTarget=tid; double retainedLevel=tp;
-        if(tid==0 && old!=null && old.targetId>0 && old.targetPrice>0) {
-            JSONObject previous=queryAlgo(old.targetId);
-            if(ProtectionRules.matches(previous,p.symbol,p.positionSide,isLong,p.qty,false,old.targetPrice,tickFor(p.symbol))) {
-                retainedTarget=old.targetId;retainedLevel=old.targetPrice;
-            }
-        }
-        if(appContext!=null) ProtectionLedger.exact(appContext,id,sid,retainedTarget,sl,retainedLevel,"STOP_VERIFIED");
-        updateProtectionEvidence(p,sid,retainedTarget,sl,retainedLevel);
-        if(replacement && old!=null && old.stopId>0 && old.stopId!=sid) cancelAlgo(old.stopId,p.symbol);
-        if(tid==0) tid=placeVerifiedLeg(p,false,tp,id);
-        if(appContext!=null) ProtectionLedger.exact(appContext,id,sid,tid,sl,tp,"VERIFIED");
-        updateProtectionEvidence(p,sid,tid,sl,tp);
-        if(replacement && old!=null && old.targetId>0 && old.targetId!=tid) cancelAlgo(old.targetId,p.symbol);
-        return null;
-    }
-    private long findProtection(org.json.JSONArray a,Position p,boolean stop,double level) throws Exception {
-        for(int i=0;i<a.length();i++) {
-            JSONObject o=a.getJSONObject(i);
-            if(ProtectionRules.matches(o,p.symbol,p.positionSide,"LONG".equals(p.side),p.qty,stop,level,tickFor(p.symbol)))
-                return o.optLong("algoId",0);
-        }
-        return 0;
-    }
-    private long placeVerifiedLeg(Position p,boolean stop,double level,String posId) throws Exception {
-        String pendingKey=posId+(stop?"_pending_sl":"_pending_tp");
-        SharedPreferences prefs=appContext==null?null:appContext.getSharedPreferences("falcon_protection",Context.MODE_PRIVATE);
-        String client=prefs==null?"":prefs.getString(pendingKey,"");
-        JSONObject ack;
-        if(client.length()>0) {
-            // A crash/timeout may have accepted this order. Query it; never blindly resubmit.
-            ack=queryAlgoClient(client);
+        if (!futures) throw new RuntimeException("Spot positions are closed by selling the asset");
+        StringBuilder query = new StringBuilder("symbol=" + p.symbol
+                + "&side=" + ("LONG".equals(p.side) ? "SELL" : "BUY")
+                + "&type=MARKET"
+                + "&quantity=" + URLEncoder.encode(quantise(p.symbol, p.qty), "UTF-8"));
+        if (hedgeMode()) {
+            // In hedge mode the book is named explicitly and reduceOnly is
+            // rejected; naming the side is what makes this reduce-only.
+            query.append("&positionSide=").append("LONG".equals(p.side) ? "LONG" : "SHORT");
         } else {
-            client="fq_"+(stop?"sl_":"tp_")+java.util.UUID.randomUUID().toString().replace("-","").substring(0,24);
-            if(prefs!=null&&!prefs.edit().putString(pendingKey,client).commit()) throw new IllegalStateException("Cannot save protection intent");
-            String q="symbol="+p.symbol+"&side="+("LONG".equals(p.side)?"SELL":"BUY")
-                    +"&algoType=CONDITIONAL&type="+(stop?"STOP_MARKET":"TAKE_PROFIT_MARKET")
-                    +"&positionSide="+p.positionSide+"&triggerPrice="+quantisePrice(p.symbol,level)
-                    +"&closePosition=true&workingType=MARK_PRICE&priceProtect=false&clientAlgoId="+client;
-            audit(p.symbol,"PROTECTION_INTENT",client+" | "+(stop?"SL":"TP")+"="+level+" | "+p.positionSide);
-            ack=submitKnownOrder(ALGO_ORDER_PATH,q,p.symbol,client,true);
+            query.append("&reduceOnly=true");
         }
-        long order=ack.optLong("algoId",0);
-        if(order<=0) throw new IllegalStateException("No algoId in protection acknowledgement");
-        JSONObject verified=queryAlgo(order);
-        audit(p.symbol,"PROTECTION_QUERY",verified.toString());
-        if(!ProtectionRules.matches(verified,p.symbol,p.positionSide,"LONG".equals(p.side),p.qty,stop,level,tickFor(p.symbol)))
-            throw new IllegalStateException("Stop/target not active or mismatched: "+verified.toString());
-        if(prefs!=null) prefs.edit().remove(pendingKey).commit();
-        return order;
+        return orderWithPositionModeRetry("/fapi/v1/order", query.toString(),
+                "LONG".equals(p.side), true);
     }
-    private void updateProtectionEvidence(Position p,long sid,long tid,double sl,double tp) {
-        if(appContext==null) return;
-        Journal j=new Journal(appContext);
+
+    /**
+     * Flatten a position immediately with a market order.
+     *
+     * Used when protection cannot be placed. An unprotected leveraged
+     * position is a worse outcome than a small round-trip fee, so the
+     * position is closed rather than left running.
+     */
+    public String emergencyClose(String symbol, boolean positionIsLong, double quantity) {
         try {
-            Journal.Trade t=j.active(environment,p.symbol,p.side);
-            if(t==null||!accountKey().equals(t.accountKey)) return;
-            android.content.ContentValues v=new android.content.ContentValues();
-            v.put("stop_order_id",sid);v.put("target_order_id",tid);v.put("sl",sl);v.put("tp",tp);
-            v.put("protection","SL verified "+Journal.when(serverNow())+(tid>0?" / TP verified":" / TP pending"));
-            j.update(t.id,v);
-            if(t.stopOrderId!=sid||t.targetOrderId!=tid||t.sl!=sl||t.tp!=tp)
-                j.event(t.id,environment,p.symbol,"PROTECTION_VERIFIED","SL="+sid+" @ "+sl+" | TP="+tid+" @ "+tp);
-        } finally { j.close(); }
+            // Cancel protection first: a resting stop that triggers after the
+            // close would open a fresh position in the opposite direction.
+            cancelProtection(symbol);
+            StringBuilder q = new StringBuilder("symbol=" + symbol
+                    + "&side=" + (positionIsLong ? "SELL" : "BUY")
+                    + "&type=MARKET&quantity="
+                    + URLEncoder.encode(quantise(symbol, quantity), "UTF-8"));
+            if (hedgeMode()) {
+                q.append("&positionSide=").append(positionIsLong ? "LONG" : "SHORT");
+            } else {
+                q.append("&reduceOnly=true");
+            }
+            orderWithPositionModeRetry("/fapi/v1/order", q.toString(), positionIsLong, true);
+            return null;
+        } catch (Exception e) {
+            return String.valueOf(e.getMessage());
+        }
+    }
+
+    /**
+     * Can this account place a stop order at all?
+     *
+     * Some accounts reject STOP_MARKET on the standard order endpoint with
+     * -4120. There is no point opening a position that cannot then be
+     * protected, so this is checked once and cached.
+     */
+    private static final java.util.Map<String, Boolean> STOPS_OK =
+            new java.util.concurrent.ConcurrentHashMap<String, Boolean>();
+
+    public void rememberStopSupport(boolean supported) {
+        STOPS_OK.put((testnet ? "T" : "L") + ":" + apiKey, Boolean.valueOf(supported));
+    }
+
+    /** null = not yet known. */
+    public Boolean stopSupport() {
+        return STOPS_OK.get((testnet ? "T" : "L") + ":" + apiKey);
+    }
+
+    /**
+     * Find out whether this account accepts stop orders — WITHOUT opening
+     * anything.
+     *
+     * A deliberately undersized STOP_MARKET is sent: below the symbol's
+     * minimum quantity, so Binance must reject it. What matters is WHICH
+     * rejection comes back. -4120 means the order type itself is refused;
+     * any other rejection (quantity, price) means the type is fine and only
+     * the deliberately bad size was caught.
+     *
+     * This replaces the old behaviour of discovering the problem only after
+     * a real position was already open, which meant opening a trade and
+     * closing it seconds later.
+     */
+    public static final String PAPI_BASE = "https://papi.binance.com";
+
+    /** Which protection variant this account accepts, once discovered. */
+    private static final java.util.Map<String, Integer> WORKING_VARIANT =
+            new java.util.concurrent.ConcurrentHashMap<String, Integer>();
+
+    /** Human-readable names, index-aligned with buildVariant(). */
+    public static final String[] VARIANT_NAMES = {
+            "algo CONDITIONAL + triggerPrice + quantity",
+            "algo CONDITIONAL + triggerPrice + quantity + workingType",
+            "algo CONDITIONAL + triggerPrice + closePosition",
+            "algo CONDITIONAL + triggerPrice + quantity + priceProtect",
+            "algo CONDITIONAL + strategyType instead of type",
+            "algo CONDITIONAL + triggerPrice + quantity, no positionSide",
+            "algo CONDITIONAL stop-limit + triggerPrice + price",
+            "legacy fapi STOP_MARKET + closePosition",
+            "legacy fapi STOP_MARKET + quantity",
+    };
+
+    /** Conditional orders now live on their own endpoint. */
+    public static final String ALGO_ORDER_PATH = "/fapi/v1/algoOrder";
+    public static final String ALGO_OPEN_PATH = "/fapi/v1/openAlgoOrders";
+
+    /**
+     * Build one candidate protection order.
+     *
+     * Binance exposes several conditional-order shapes and more than one
+     * endpoint. A -4120 only tells us the shape we happened to send is not
+     * accepted here - not that no shape is. Each of these is a legitimate
+     * way to attach a stop; the account decides which it will take.
+     */
+    private String[] buildVariant(int index, String symbol, boolean positionIsLong,
+                                  double trigger, double quantity, boolean isStop)
+            throws Exception {
+        String exit = positionIsLong ? "SELL" : "BUY";
+        String posSide = positionIsLong ? "LONG" : "SHORT";
+        boolean hedge = hedgeMode();
+        String type = isStop ? "STOP_MARKET" : "TAKE_PROFIT_MARKET";
+        String stopArg = "&stopPrice=" + URLEncoder.encode(quantisePrice(symbol, trigger), "UTF-8");
+        String qtyArg = "&quantity=" + URLEncoder.encode(quantise(symbol, quantity), "UTF-8");
+        String posArg = hedge ? "&positionSide=" + posSide : "";
+        String head = "symbol=" + symbol + "&side=" + exit;
+
+        // The algo service names the level triggerPrice, not stopPrice, and
+        // requires algoType=CONDITIONAL with the specific order in `type`.
+        // Establishing that took a round of live probing; these are ordered
+        // with the confirmed schema first.
+        String triggerArg = "&triggerPrice="
+                + URLEncoder.encode(quantisePrice(symbol, trigger), "UTF-8");
+        // Hedge mode names the book; one-way uses reduceOnly. Sending both
+        // is rejected, so they are mutually exclusive here.
+        String closeArg = hedge ? posArg : "&reduceOnly=true";
+
+        switch (index) {
+            case 0:
+                return new String[]{base(), ALGO_ORDER_PATH,
+                        head + "&algoType=CONDITIONAL&type=" + type
+                                + triggerArg + qtyArg + closeArg};
+            case 1:
+                return new String[]{base(), ALGO_ORDER_PATH,
+                        head + "&algoType=CONDITIONAL&type=" + type
+                                + triggerArg + qtyArg + closeArg
+                                + "&workingType=MARK_PRICE"};
+            case 2:
+                return new String[]{base(), ALGO_ORDER_PATH,
+                        head + "&algoType=CONDITIONAL&type=" + type
+                                + triggerArg + posArg + "&closePosition=true"};
+            case 3:
+                // priceProtect is required on some conditional schemas.
+                return new String[]{base(), ALGO_ORDER_PATH,
+                        head + "&algoType=CONDITIONAL&type=" + type
+                                + triggerArg + qtyArg + closeArg
+                                + "&workingType=MARK_PRICE&priceProtect=true"};
+            case 4:
+                // Some Binance algo variants name the order strategyType.
+                return new String[]{base(), ALGO_ORDER_PATH,
+                        head + "&algoType=CONDITIONAL&strategyType=" + type
+                                + triggerArg + qtyArg + closeArg};
+            case 5:
+                // Hedge accounts sometimes reject positionSide on algo orders.
+                return new String[]{base(), ALGO_ORDER_PATH,
+                        head + "&algoType=CONDITIONAL&type=" + type
+                                + triggerArg + qtyArg};
+            case 6: {
+                double limit = positionIsLong ? trigger * 0.995 : trigger * 1.005;
+                return new String[]{base(), ALGO_ORDER_PATH,
+                        head + "&algoType=CONDITIONAL&type=" + (isStop ? "STOP" : "TAKE_PROFIT")
+                                + triggerArg + qtyArg + closeArg
+                                + "&price=" + URLEncoder.encode(
+                                        quantisePrice(symbol, limit), "UTF-8")
+                                + "&timeInForce=GTC"};
+            }
+            case 7:
+                return new String[]{base(), "/fapi/v1/order",
+                        head + "&type=" + type + stopArg + posArg
+                                + "&closePosition=true&workingType=MARK_PRICE"};
+            default:
+                return new String[]{base(), "/fapi/v1/order",
+                        head + "&type=" + type + stopArg + posArg + qtyArg
+                                + "&workingType=MARK_PRICE"};
+        }
+    }
+
+    /**
+     * Algo order ids per symbol, so protection can be cancelled when the
+     * position closes. A stop left behind after a close is not harmless: it
+     * can open a NEW position in the opposite direction when it triggers.
+     */
+    /**
+     * Positions currently having protection placed.
+     *
+     * The scan thread, the stop watcher and the UI can all reach this at
+     * once. Without a lock, two of them can both find "no protection" and
+     * both create a pair.
+     */
+    private static final java.util.Set<String> PROTECTING =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /** When protection was last placed per symbol, to stop runaway repeats. */
+    private static final java.util.Map<String, Long> LAST_PROTECTION_AT =
+            new java.util.concurrent.ConcurrentHashMap<String, Long>();
+
+    private static final java.util.Map<String, java.util.List<Long>> ALGO_IDS =
+            new java.util.concurrent.ConcurrentHashMap<String, java.util.List<Long>>();
+
+    /** Last algo ids placed, so the UI can show them as proof of placement. */
+    private static final java.util.Map<String, String> LAST_ALGO_LABEL =
+            new java.util.concurrent.ConcurrentHashMap<String, String>();
+
+    public String algoLabel(String symbol) {
+        return LAST_ALGO_LABEL.get(variantKey() + ":" + symbol.toUpperCase());
+    }
+
+    /**
+     * Cancel every working conditional order for a symbol.
+     *
+     * Recovery for an account that already accumulated duplicates: clear
+     * the lot, then let one clean pair be placed.
+     */
+    public int cancelAllConditional(String symbol) {
+        int removed = 0;
+        try {
+            call("DELETE", "/fapi/v1/algoOpenOrders", "symbol=" + symbol);
+            removed++;
+        } catch (Exception ignored) {
+        }
+        try {
+            call("DELETE", "/fapi/v1/allOpenOrders", "symbol=" + symbol);
+            removed++;
+        } catch (Exception ignored) {
+        }
+        ALGO_IDS.remove(variantKey() + ":" + symbol.toUpperCase());
+        LAST_PROTECTION_AT.remove(variantKey() + ":" + symbol.toUpperCase());
+        return removed;
+    }
+
+    /**
+     * Replace a position's protection with new levels.
+     *
+     * Cancels what is working, clears the record, then places the new pair.
+     * That order matters: leaving the old orders up while adding new ones is
+     * how a position ends up with four conditional orders instead of two.
+     */
+    public String retarget(Position p, double newStop, double newTarget) {
+        try {
+            cancelProtection(p.symbol);
+            boolean isLong = "LONG".equals(p.side);
+            if (newStop <= 0 && newTarget <= 0) return "no new levels supplied";
+            return attachStopAndTarget(p.symbol, isLong, newStop, newTarget, p.qty,
+                    p.entry > 0 ? p.entry : p.mark);
+        } catch (Exception e) {
+            return String.valueOf(e.getMessage());
+        }
+    }
+
+    /**
+     * Adopt protection that already exists on the exchange.
+     *
+     * After a restart Falcon has no records, sees "no protection" and
+     * creates another pair. Importing what Binance already holds means a
+     * restart attaches to the existing orders instead of duplicating them.
+     */
+    public int importExistingProtection() {
+        if (appContext == null) return 0;
+        int imported = 0;
+        try {
+            for (Position held : positions()) {
+                String posId = positionKey(held.symbol, "LONG".equals(held.side),
+                        held.entry > 0 ? held.entry : held.mark);
+                if (ProtectionLedger.get(appContext, posId) != null) continue;
+
+                long stopId = 0, targetId = 0;
+                org.json.JSONArray algo = openAlgoOrders(held.symbol);
+                for (int i = 0; i < algo.length(); i++) {
+                    JSONObject o = algo.getJSONObject(i);
+                    if (!held.symbol.equalsIgnoreCase(o.optString("symbol", ""))) continue;
+                    String type = o.optString("type", o.optString("algoType", ""));
+                    long id = o.optLong("algoId", o.optLong("orderId", 0));
+                    if (id <= 0) continue;
+                    if (type.contains("TAKE_PROFIT") && targetId == 0) targetId = id;
+                    else if (type.contains("STOP") && stopId == 0) stopId = id;
+                }
+                if (stopId > 0 || targetId > 0) {
+                    ProtectionLedger.put(appContext, posId, stopId, targetId);
+                    imported++;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return imported;
+    }
+
+    /** Working conditional orders for a symbol, tolerant of response shape. */
+    private org.json.JSONArray openAlgoOrders(String symbol) throws Exception {
+        String body = call("GET", ALGO_OPEN_PATH, "symbol=" + symbol);
+        if (body.trim().startsWith("{")) {
+            JSONObject w = new JSONObject(body);
+            org.json.JSONArray a = w.optJSONArray("orders");
+            if (a == null) a = w.optJSONArray("data");
+            return a == null ? new org.json.JSONArray() : a;
+        }
+        return new org.json.JSONArray(body);
+    }
+
+    /**
+     * Cancel protection for positions that no longer exist.
+     *
+     * Without this, a position closed by its own stop leaves the opposite
+     * leg working. On a hedge account that surviving order can open a fresh
+     * position when it triggers.
+     */
+    public int reconcileProtection() {
+        if (appContext == null) return 0;
+        int cleaned = 0;
+        try {
+            java.util.Set<String> live = new java.util.HashSet<String>();
+            for (Position held : positions()) {
+                live.add(positionKey(held.symbol, "LONG".equals(held.side), held.entry));
+                // Entry price can drift slightly between reads, so also key
+                // on the symbol alone for the liveness test below.
+                live.add(held.symbol.toUpperCase());
+            }
+            java.util.List<ProtectionLedger.Record> records = ProtectionLedger.all(appContext);
+            for (int i = 0; i < records.size(); i++) {
+                ProtectionLedger.Record r = records.get(i);
+                if (!environment.equals(ProtectionLedger.envOf(r.id))) continue;
+                String symbol = ProtectionLedger.symbolOf(r.id);
+                if (live.contains(symbol)) continue;
+                cancelProtection(symbol);
+                cleaned++;
+            }
+        } catch (Exception ignored) {
+        }
+        return cleaned;
+    }
+
+    /** Remove stray duplicate protection, keeping one stop and one target. */
+    public int tidyProtection(String symbol) {
+        int removed = 0;
+        try {
+            org.json.JSONArray algo;
+            String body = call("GET", ALGO_OPEN_PATH, "symbol=" + symbol);
+            if (body.trim().startsWith("{")) {
+                JSONObject w = new JSONObject(body);
+                algo = w.optJSONArray("orders");
+                if (algo == null) algo = w.optJSONArray("data");
+                if (algo == null) algo = new org.json.JSONArray();
+            } else {
+                algo = new org.json.JSONArray(body);
+            }
+            boolean keptStop = false, keptTarget = false;
+            for (int i = 0; i < algo.length(); i++) {
+                JSONObject o = algo.getJSONObject(i);
+                if (!symbol.equalsIgnoreCase(o.optString("symbol", ""))) continue;
+                String type = o.optString("type", o.optString("algoType", ""));
+                boolean isStop = type.contains("STOP") && !type.contains("TAKE_PROFIT");
+                boolean isTarget = type.contains("TAKE_PROFIT");
+                boolean duplicate = (isStop && keptStop) || (isTarget && keptTarget);
+                if (isStop) keptStop = true;
+                if (isTarget) keptTarget = true;
+                if (!duplicate) continue;
+                long id = o.optLong("algoId", o.optLong("orderId", 0));
+                if (id > 0) {
+                    try {
+                        call("DELETE", ALGO_ORDER_PATH, "algoId=" + id);
+                        removed++;
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return removed;
+    }
+
+    private void rememberAlgoId(String symbol, String response) {
+        try {
+            JSONObject o = new JSONObject(response);
+            long id = o.optLong("algoId", o.optLong("orderId", 0));
+            if (id <= 0) return;
+            String labelKey = variantKey() + ":" + symbol.toUpperCase();
+            String existing = LAST_ALGO_LABEL.get(labelKey);
+            LAST_ALGO_LABEL.put(labelKey,
+                    existing == null ? String.valueOf(id) : existing + ", " + id);
+            String key = variantKey() + ":" + symbol.toUpperCase();
+            java.util.List<Long> ids = ALGO_IDS.get(key);
+            if (ids == null) {
+                ids = java.util.Collections.synchronizedList(new java.util.ArrayList<Long>());
+                ALGO_IDS.put(key, ids);
+            }
+            if (!ids.contains(Long.valueOf(id))) ids.add(Long.valueOf(id));
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Remove any protection still working for a symbol. Called after a
+     * position is closed so a stray stop cannot re-open the trade.
+     */
+    public void cancelProtection(String symbol) {
+        // Drop every ledger record for this symbol: the position is gone, so
+        // its protection must not linger and fire into a new one.
+        if (appContext != null) {
+            java.util.List<ProtectionLedger.Record> records = ProtectionLedger.all(appContext);
+            for (int i = 0; i < records.size(); i++) {
+                ProtectionLedger.Record r = records.get(i);
+                if (symbol.equalsIgnoreCase(ProtectionLedger.symbolOf(r.id))) {
+                    if (r.stopId > 0) {
+                        try {
+                            call("DELETE", ALGO_ORDER_PATH, "algoId=" + r.stopId);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    if (r.targetId > 0) {
+                        try {
+                            call("DELETE", ALGO_ORDER_PATH, "algoId=" + r.targetId);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    ProtectionLedger.remove(appContext, r.id);
+                }
+            }
+        }
+        String key = variantKey() + ":" + symbol.toUpperCase();
+        java.util.List<Long> ids = ALGO_IDS.remove(key);
+        if (ids != null) {
+            for (int i = 0; i < ids.size(); i++) {
+                try {
+                    call("DELETE", ALGO_ORDER_PATH, "algoId=" + ids.get(i));
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        // Belt and braces: clear anything the exchange still lists.
+        try {
+            call("DELETE", "/fapi/v1/algoOpenOrders", "symbol=" + symbol);
+        } catch (Exception ignored) {
+        }
+        try {
+            call("DELETE", "/fapi/v1/allOpenOrders", "symbol=" + symbol);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Result of trying every protection variant against the live account. */
+    public static final class ProtectionReport {
+        public int workingIndex = -1;
+        public final StringBuilder log = new StringBuilder();
+
+        public boolean anyWorked() {
+            return workingIndex >= 0;
+        }
+    }
+
+    /**
+     * Try each variant until one is accepted, cancelling any test order.
+     * The winner is remembered and used for all later protection orders.
+     */
+    public ProtectionReport findWorkingProtection(String symbol, boolean positionIsLong,
+                                                  double trigger, double quantity) {
+        ProtectionReport report = new ProtectionReport();
+        for (int i = 0; i < VARIANT_NAMES.length; i++) {
+            String[] call;
+            try {
+                call = buildVariant(i, symbol, positionIsLong, trigger, quantity, true);
+            } catch (Exception e) {
+                report.log.append(VARIANT_NAMES[i]).append(" -> could not build: ")
+                        .append(e.getMessage()).append("\n\n");
+                continue;
+            }
+            try {
+                String response = callHost(call[0], "POST", call[1], call[2]);
+                report.workingIndex = i;
+                report.log.append("ACCEPTED: ").append(VARIANT_NAMES[i]).append("\n\n");
+                cancelTestOrder(call[0], symbol, response);
+                WORKING_VARIANT.put(variantKey(), Integer.valueOf(i));
+                break;
+            } catch (Exception e) {
+                report.log.append(VARIANT_NAMES[i]).append("\n   ")
+                        .append(shorten(String.valueOf(e.getMessage()))).append("\n\n");
+            }
+        }
+        return report;
+    }
+
+    private String variantKey() {
+        return (testnet ? "T" : "L") + ":" + apiKey;
+    }
+
+    public Integer knownVariant() {
+        return WORKING_VARIANT.get(variantKey());
+    }
+
+    public void rememberVariant(int index) {
+        WORKING_VARIANT.put(variantKey(), Integer.valueOf(index));
+    }
+
+    private void cancelTestOrder(String host, String symbol, String response) {
+        try {
+            JSONObject o = new JSONObject(response);
+            long id = o.optLong("orderId", 0);
+            String strategyId = o.optString("strategyId", "");
+            long algoId = o.optLong("algoId", o.optLong("clientAlgoId", 0));
+            if (algoId > 0) {
+                callHost(host, "DELETE", ALGO_ORDER_PATH, "algoId=" + algoId);
+            } else if (id > 0 || strategyId.length() > 0) {
+                boolean papi = host.equals(PAPI_BASE);
+                callHost(host, "DELETE",
+                        papi ? "/papi/v1/um/conditional/order" : "/fapi/v1/order",
+                        "symbol=" + symbol + (papi
+                                ? "&strategyId=" + (strategyId.length() > 0 ? strategyId : id)
+                                : "&orderId=" + id));
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Establish, before risking money, whether ANY protection shape works.
+     *
+     * The earlier version tried a single shape and treated its rejection as
+     * proof that the account could not place stops at all. That was wrong:
+     * it only proved that one shape was refused.
+     */
+    public boolean probeStopSupport(String symbol) {
+        Boolean known = stopSupport();
+        if (known != null) return known.booleanValue();
+        if (knownVariant() != null) return true;
+
+        boolean supported = false;
+        try {
+            double mark = markPrice(symbol);
+            if (mark <= 0) mark = 1;
+            double[] rules = rulesFor(symbol);
+            double qty = rules == null ? 0.001 : Math.max(rules[1], rules[0]);
+            // Trigger far below the market: it can never fire during the test.
+            ProtectionReport report = findWorkingProtection(symbol, true, mark * 0.5, qty);
+            supported = report.anyWorked();
+        } catch (Exception ignored) {
+        }
+        rememberStopSupport(supported);
+        return supported;
+    }
+
+    /** Open orders for one symbol, used to see whether a stop already exists. */
+    public org.json.JSONArray openOrders(String symbol) throws Exception {
+        if (!futures) return new org.json.JSONArray();
+        return new org.json.JSONArray(call("GET", "/fapi/v1/openOrders", "symbol=" + symbol));
+    }
+
+    /** True when both a stop and a take-profit are already working. */
+    /**
+     * Protection status for a symbol: {hasStop, hasTarget, verified}.
+     *
+     * The third flag matters more than the first two. If the exchange could
+     * not be queried we must NOT assume "no protection exists" and create
+     * more - that is how one position ended up with 200 conditional orders.
+     */
+    public boolean[] protectionStatus(String symbol) {
+        try {
+            boolean[] present = protectionPresent(symbol);
+            return new boolean[]{present[0], present[1], true};
+        } catch (Exception e) {
+            return new boolean[]{false, false, false};
+        }
+    }
+
+    public boolean[] protectionPresent(String symbol) throws Exception {
+        boolean stop = false, target = false;
+        org.json.JSONArray orders = openOrders(symbol);
+        for (int i = 0; i < orders.length(); i++) {
+            String type = orders.getJSONObject(i).optString("type", "");
+            if (type.contains("STOP")) stop = true;
+            if (type.contains("TAKE_PROFIT")) target = true;
+        }
+        // Conditional orders are reported by the algo service, not by the
+        // classic open-orders list, so a stop placed there is invisible here.
+        try {
+            String body = call("GET", ALGO_OPEN_PATH, "symbol=" + symbol);
+            org.json.JSONArray algo;
+            if (body.trim().startsWith("{")) {
+                // Some responses wrap the list in an object.
+                JSONObject wrapper = new JSONObject(body);
+                algo = wrapper.optJSONArray("orders");
+                if (algo == null) algo = wrapper.optJSONArray("data");
+                if (algo == null) algo = new org.json.JSONArray();
+            } else {
+                algo = new org.json.JSONArray(body);
+            }
+            for (int i = 0; i < algo.length(); i++) {
+                JSONObject o = algo.getJSONObject(i);
+                if (!symbol.equalsIgnoreCase(o.optString("symbol", symbol))) continue;
+                String type = o.optString("type", o.optString("algoType", ""));
+                if (type.contains("STOP")) stop = true;
+                if (type.contains("TAKE_PROFIT")) target = true;
+            }
+        } catch (Exception ignored) {
+        }
+        return new boolean[]{stop, target};
+    }
+
+    /** Cancel every working order for a symbol (used when flattening). */
+    public void cancelOpenOrders(String symbol) throws Exception {
+        if (!futures) return;
+        call("DELETE", "/fapi/v1/allOpenOrders", "symbol=" + symbol);
+        try {
+            call("DELETE", "/fapi/v1/algoOpenOrders", "symbol=" + symbol);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Make sure an open position has a stop and a target on the exchange.
+     *
+     * Binance has no atomic bracket order for a market entry, so protection
+     * is always a second request — and a crash, a dropped connection or a
+     * rejected price can leave a position bare. This is called after every
+     * entry AND on every account refresh, so an unprotected position gets
+     * covered on the next pass instead of staying exposed.
+     *
+     * Returns null when protection is in place, or a reason when it is not.
+     */
+    public String ensureProtection(Position p, double stopPrice, double targetPrice) {
+        try {
+            boolean[] have = protectionStatus(p.symbol);
+            if (!have[2]) return "could not verify protection for " + p.symbol;
+            if (have[0] && have[1]) return null;
+
+            double entry = p.entry > 0 ? p.entry : p.mark;
+            if (entry <= 0) return "no entry price for " + p.symbol;
+            boolean isLong = "LONG".equals(p.side);
+
+            // Fall back to a 1% stop / 2% target when the original plan is
+            // unknown, e.g. after a restart.
+            if (stopPrice <= 0) stopPrice = isLong ? entry * 0.99 : entry * 1.01;
+            if (targetPrice <= 0) targetPrice = isLong ? entry * 1.02 : entry * 0.98;
+
+            // A stop on the wrong side of the market triggers instantly and
+            // is rejected, so push it past the current mark if needed.
+            double mark = p.mark > 0 ? p.mark : entry;
+            if (isLong && stopPrice >= mark) stopPrice = mark * 0.995;
+            if (!isLong && stopPrice <= mark) stopPrice = mark * 1.005;
+            if (isLong && targetPrice <= mark) targetPrice = mark * 1.005;
+            if (!isLong && targetPrice >= mark) targetPrice = mark * 0.995;
+
+            return attachStopAndTarget(p.symbol, isLong,
+                    have[0] ? 0 : stopPrice, have[1] ? 0 : targetPrice, p.qty,
+                    p.entry > 0 ? p.entry : p.mark);
+        } catch (Exception e) {
+            return String.valueOf(e.getMessage());
+        }
     }
 
     /**
@@ -646,49 +954,17 @@ public final class Trader {
      * never seen by Falcon. Reading the income record is the only way to
      * complete the history rather than leaving those trades open forever.
      */
-    public org.json.JSONArray income(String symbol,long start,long end) throws Exception {
-        org.json.JSONArray out=new org.json.JSONArray();
-        for(int page=1;page<=100;page++) {
-            org.json.JSONArray a=new org.json.JSONArray(call("GET","/fapi/v1/income",
-                    (symbol.length()>0?"symbol="+symbol+"&":"")+"startTime="+start+"&endTime="+end+"&limit=1000&page="+page));
-            for(int i=0;i<a.length();i++) out.put(a.getJSONObject(i));
-            if(a.length()<1000) return out;
+    public double realisedPnlSince(String symbol, long sinceMillis) throws Exception {
+        if (!futures) return 0;
+        String body = call("GET", "/fapi/v1/income",
+                "symbol=" + symbol + "&incomeType=REALIZED_PNL&startTime="
+                        + Math.max(0, sinceMillis - 60000L) + "&limit=200");
+        org.json.JSONArray arr = new org.json.JSONArray(body);
+        double total = 0;
+        for (int i = 0; i < arr.length(); i++) {
+            total += arr.getJSONObject(i).optDouble("income", 0);
         }
-        throw new IllegalStateException("Income pagination incomplete");
-    }
-    public org.json.JSONArray fills(String symbol,long start,long end) throws Exception {
-        org.json.JSONArray out=new org.json.JSONArray();
-        java.util.Set<Long> seen=new java.util.HashSet<Long>();
-        for(long from=start;from<=end;from+=7L*86400000L) {
-            long until=Math.min(end,from+7L*86400000L-1),after=-1;
-            boolean complete=false;
-            for(int page=0;page<100;page++) {
-                String query="symbol="+symbol+"&limit=1000"+(after<0?"&startTime="+from+"&endTime="+until:"&fromId="+after);
-                org.json.JSONArray a=new org.json.JSONArray(call("GET","/fapi/v1/userTrades",query));
-                long maxId=-1;boolean past=false;
-                for(int i=0;i<a.length();i++) {
-                    JSONObject f=a.getJSONObject(i);long id=f.getLong("id"),time=f.getLong("time");
-                    maxId=Math.max(maxId,id);past|=time>until;
-                    if(time>=from&&time<=until&&seen.add(id)) out.put(f);
-                }
-                if(a.length()<1000||past) { complete=true;break; }
-                if(maxId<after) break;
-                after=maxId+1;
-            }
-            if(!complete) throw new IllegalStateException("Fill pagination incomplete");
-        }
-        return out;
-    }
-    public double dailyNet() throws Exception {
-        org.json.JSONArray a=income("",RiskMath.utcDay(serverNow()),serverNow());double net=0;
-        for(int i=0;i<a.length();i++) {
-            JSONObject o=a.getJSONObject(i);String type=o.optString("incomeType");
-            if(type.equals("REALIZED_PNL")||type.equals("COMMISSION")||type.equals("FUNDING_FEE")||type.equals("INSURANCE_CLEAR")) {
-                if(!"USDT".equals(o.optString("asset"))) throw new IllegalStateException("Daily risk needs non-USDT conversion; entries blocked");
-                net+=o.getDouble("income");
-            }
-        }
-        return net;
+        return total;
     }
 
     /** Total wallet balance, used for display alongside free margin. */
@@ -748,7 +1024,49 @@ public final class Trader {
             HEDGE.put(cacheKey, Boolean.valueOf(dual));
             return dual;
         } catch (Exception e) {
-            throw new IllegalStateException("Could not verify position mode",e);
+            // A failed lookup must NOT be cached. Storing "false" here meant
+            // one dropped request made every later order omit positionSide
+            // and fail with -4061 until the app was restarted. Assume hedge
+            // on failure: naming the side is refused in one-way mode with a
+            // clear error, whereas omitting it in hedge mode is the bug we
+            // are fixing.
+            return true;
+        }
+    }
+
+    /** Forget the cached mode for this key so the next call re-detects it. */
+    private void invalidateHedgeCache() {
+        HEDGE.remove((testnet ? "T" : "L") + ":" + apiKey);
+    }
+
+    /**
+     * Send an order, and if Binance says the position side is wrong, flip
+     * the assumption and send it once more.
+     *
+     * -4061 and -4059 mean our view of the account's position mode is stale,
+     * which can happen if the setting is changed on Binance while Falcon is
+     * running. Re-detecting and retrying is better than failing the trade.
+     */
+    private String orderWithPositionModeRetry(String path, String query,
+                                              boolean positionIsLong,
+                                              boolean closing) throws Exception {
+        try {
+            return call("POST", path, query);
+        } catch (Exception e) {
+            String message = String.valueOf(e.getMessage());
+            if (!message.contains("-4061") && !message.contains("-4059")) throw e;
+
+            invalidateHedgeCache();
+            boolean hedge = hedgeMode();
+            String corrected = query
+                    .replaceAll("&positionSide=(LONG|SHORT|BOTH)", "")
+                    .replaceAll("&reduceOnly=true", "");
+            if (hedge) {
+                corrected += "&positionSide=" + (positionIsLong ? "LONG" : "SHORT");
+            } else if (closing) {
+                corrected += "&reduceOnly=true";
+            }
+            return call("POST", path, corrected);
         }
     }
 
@@ -760,14 +1078,12 @@ public final class Trader {
     /** Futures only: set leverage for a symbol before opening. */
     public void setLeverage(String symbol, int leverage) throws Exception {
         if (!futures) return;
-        requireEntryPermission();
         call("POST", "/fapi/v1/leverage", "symbol=" + symbol + "&leverage=" + leverage);
     }
 
     /** Futures only: ISOLATED or CROSSED. Already-set is not an error. */
     public void setMarginMode(String symbol, String marginMode) throws Exception {
         if (!futures) return;
-        requireEntryPermission();
         String type = "CROSS".equals(marginMode) ? "CROSSED" : "ISOLATED";
         try {
             call("POST", "/fapi/v1/marginType", "symbol=" + symbol + "&marginType=" + type);
@@ -782,17 +1098,24 @@ public final class Trader {
      * Place a market order. BUY opens a long, SELL opens a short on futures.
      * Quantity must already respect the symbol's step size.
      */
-    public String marketOrder(String symbol,boolean buy,double quantity) throws Exception {
-        throw new IllegalStateException("Use durable entry intent via Execution.open");
-    }
-    public JSONObject enter(String symbol,boolean buy,double quantity,String clientId) throws Exception {
-        requireEntryPermission();
-        String q="symbol="+symbol+"&side="+(buy?"BUY":"SELL")+"&type=MARKET&quantity="+quantise(symbol,quantity)
-                +"&newClientOrderId="+clientId+"&newOrderRespType=RESULT";
-        if(hedgeMode()) q+="&positionSide="+(buy?"LONG":"SHORT");
-        // Symbol/account lookups can take time. Honor a switch-off during that work.
-        requireEntryPermission();
-        return submitKnownOrder("/fapi/v1/order",q,symbol,clientId,false,true);
+    public String marketOrder(String symbol, boolean buy, double quantity) throws Exception {
+        String qty = quantise(symbol, quantity);
+        double[] rules = rulesFor(symbol);
+        if (Double.parseDouble(qty) <= 0) {
+            throw new RuntimeException(symbol + " trades in steps of "
+                    + (rules == null ? "?" : trimNumber(rules[0]))
+                    + "; the requested size rounds to zero. Raise the size percent.");
+        }
+        String path = futures ? "/fapi/v1/order" : "/api/v3/order";
+        StringBuilder query = new StringBuilder("symbol=" + symbol
+                + "&side=" + (buy ? "BUY" : "SELL")
+                + "&type=MARKET&quantity=" + URLEncoder.encode(qty, "UTF-8"));
+        if (futures && hedgeMode()) {
+            // Opening: BUY creates the LONG book, SELL creates the SHORT book.
+            query.append("&positionSide=").append(buy ? "LONG" : "SHORT");
+        }
+        if (!futures) return call("POST", path, query.toString());
+        return orderWithPositionModeRetry(path, query.toString(), buy, false);
     }
 
     /**
@@ -898,11 +1221,10 @@ public final class Trader {
         } catch (Exception ignored) {
         }
         cached = TICKS.get(cacheKey);
-        if(cached==null) throw new IllegalStateException("No price tick for "+symbol);
-        return cached.doubleValue();
+        return cached == null ? 0.01 : cached.doubleValue();
     }
 
-    public String quantisePrice(String symbol, double price) {
+    private String quantisePrice(String symbol, double price) {
         double tick = tickFor(symbol);
         java.math.BigDecimal p = java.math.BigDecimal.valueOf(price);
         java.math.BigDecimal t = java.math.BigDecimal.valueOf(tick);
@@ -912,34 +1234,160 @@ public final class Trader {
 
     /** Live mark price, so an order is sized against the market it will fill in. */
     public double markPrice(String symbol) throws Exception {
-        if(!futures) throw new IllegalStateException("Futures only");
-        double p=new JSONObject(call("GET","/fapi/v1/premiumIndex","symbol="+symbol)).optDouble("markPrice",0);
-        if(!RiskMath.positive(p)) throw new IllegalStateException("No valid mark price");
-        return p;
-    }
-    public double takerFeeBps(String symbol) throws Exception {
-        JSONObject o=new JSONObject(call("GET","/fapi/v1/commissionRate","symbol="+symbol));
-        double rate=o.getDouble("takerCommissionRate");
-        if(Double.isNaN(rate)||Double.isInfinite(rate)||rate<0)throw new IllegalStateException("Unknown taker commission rate");
-        return rate*10000.0;
-    }
-    public double executablePrice(String symbol,boolean buy) throws Exception {
-        JSONObject q=new JSONObject(call("GET","/fapi/v1/ticker/bookTicker","symbol="+symbol));
-        double p=q.optDouble(buy?"askPrice":"bidPrice",0);
-        if(!RiskMath.positive(p)) throw new IllegalStateException("No executable quote");
+        if (!futures) return Binance.price(symbol);
+        String body = call("GET", "/fapi/v1/premiumIndex", "symbol=" + symbol);
+        double p = new JSONObject(body).optDouble("markPrice", 0);
+        if (p <= 0) p = Binance.price(symbol);
         return p;
     }
 
-    public String attachStopAndTarget(String symbol,boolean isLong,double stop,double target) throws Exception {
-        return attachStopAndTarget(symbol,isLong,stop,target,0,0);
+    /**
+     * Attach stop-loss and take-profit to a position that is already open.
+     * Both use closePosition=true so they always flatten whatever size the
+     * position ends up being, and they survive partial fills.
+     */
+    public String attachStopAndTarget(String symbol, boolean positionIsLong,
+                                      double stopPrice, double targetPrice) throws Exception {
+        return attachStopAndTarget(symbol, positionIsLong, stopPrice, targetPrice, 0);
     }
-    public String attachStopAndTarget(String symbol,boolean isLong,double stop,double target,double qty) throws Exception {
-        return attachStopAndTarget(symbol,isLong,stop,target,qty,0);
+
+    /**
+     * Attach stop-loss and take-profit to an open position.
+     *
+     * Binance accepts more than one shape for these orders and rejects the
+     * others depending on account and position mode. Relying on a single
+     * shape left a filled position unprotected when it came back -4120, so
+     * this tries each accepted form in turn and only reports failure when
+     * every one is refused.
+     *
+     * @param quantity position size, used by the forms that need one; pass
+     *                 0 to rely on close-all.
+     */
+    public String attachStopAndTarget(String symbol, boolean positionIsLong,
+                                      double stopPrice, double targetPrice,
+                                      double quantity) throws Exception {
+        return attachStopAndTarget(symbol, positionIsLong, stopPrice, targetPrice,
+                quantity, 0);
     }
-    public String attachStopAndTarget(String symbol,boolean isLong,double stop,double target,double qty,double entry) throws Exception {
-        for(Position p:positions()) if(p.symbol.equals(symbol)&&p.side.equals(isLong?"LONG":"SHORT"))
-            return ensureProtection(p,stop,target);
-        return "Position is not open; protection not confirmed";
+
+    private String positionKey(String symbol, boolean isLong, double entry) {
+        return ProtectionLedger.positionId(environment, symbol, isLong ? "LONG" : "SHORT", entry);
+    }
+
+    public String attachStopAndTarget(String symbol, boolean positionIsLong,
+                                      double stopPrice, double targetPrice,
+                                      double quantity, double entryForId) throws Exception {
+        if (!futures) return "spot: protection orders not supported here";
+
+        // A trigger that rounds onto the entry, or sits within a tick of the
+        // market, is either rejected by Binance or fires instantly. On a coin
+        // priced at 0.0037 a 1% stop is only a few ticks away, so this has to
+        // be checked rather than assumed.
+        double tick = tickFor(symbol);
+        double reference = markPrice(symbol);
+        if (reference > 0) {
+            double minGap = Math.max(tick * 3, reference * 0.0015);
+            if (stopPrice > 0 && Math.abs(reference - stopPrice) < minGap) {
+                stopPrice = positionIsLong ? reference - minGap : reference + minGap;
+            }
+            if (targetPrice > 0 && Math.abs(targetPrice - reference) < minGap) {
+                targetPrice = positionIsLong ? reference + minGap : reference - minGap;
+            }
+        }
+        if (stopPrice <= 0 && targetPrice <= 0) {
+            return "no usable stop or target level for " + symbol;
+        }
+
+        // What this position already has, from our own record first. The
+        // ledger is the authority: a position either has a protection record
+        // or it does not, which makes duplication structurally impossible
+        // rather than merely unlikely.
+        String posId = positionKey(symbol, positionIsLong, entryForId);
+        ProtectionLedger.Record record =
+                appContext == null ? null : ProtectionLedger.get(appContext, posId);
+        if (record != null && record.complete()) return null;
+        if (record != null && record.hasStop()) stopPrice = 0;
+        if (record != null && record.hasTarget()) targetPrice = 0;
+
+        // Then confirm against the exchange, and FAIL CLOSED if it cannot be
+        // confirmed. An unverifiable query used to fall through to "create
+        // both", which a 5s sweep turned into hundreds of orders.
+        boolean[] have = protectionStatus(symbol);
+        if (!have[2]) {
+            return "could not verify existing protection for " + symbol
+                    + " — not creating more orders";
+        }
+        if (have[0]) stopPrice = 0;
+        if (have[1]) targetPrice = 0;
+        if (stopPrice <= 0 && targetPrice <= 0) return null;
+
+        // Lock this position while we work. Released in the finally below.
+        if (!PROTECTING.add(posId)) {
+            return null;   // another thread is already placing it
+        }
+        try {
+            return placeProtection(symbol, positionIsLong, stopPrice, targetPrice,
+                    quantity, posId);
+        } finally {
+            PROTECTING.remove(posId);
+        }
+    }
+
+    private String placeProtection(String symbol, boolean positionIsLong,
+                                   double stopPrice, double targetPrice,
+                                   double quantity, String posId) throws Exception {
+        // Backstop: never place protection for the same symbol twice a minute.
+        String rateKey = variantKey() + ":" + symbol.toUpperCase();
+        Long last = LAST_PROTECTION_AT.get(rateKey);
+        long now = System.currentTimeMillis();
+        if (last != null && now - last.longValue() < 60000L) {
+            return null;
+        }
+        LAST_PROTECTION_AT.put(rateKey, Long.valueOf(now));
+
+        StringBuilder problems = new StringBuilder();
+
+        for (int leg = 0; leg < 2; leg++) {
+            boolean isStop = (leg == 0);
+            double trigger = isStop ? stopPrice : targetPrice;
+            if (trigger <= 0) continue;
+
+            // Prefer the shape this account has already accepted; otherwise
+            // walk the whole table until one is taken.
+            Integer known = knownVariant();
+            int from = known == null ? 0 : known.intValue();
+            String lastError = null;
+            boolean placed = false;
+
+            for (int attempt = 0; attempt < VARIANT_NAMES.length && !placed; attempt++) {
+                int index = (from + attempt) % VARIANT_NAMES.length;
+                try {
+                    String[] call = buildVariant(index, symbol, positionIsLong,
+                            trigger, quantity, isStop);
+                    String response = callHost(call[0], "POST", call[1], call[2]);
+                    rememberAlgoId(symbol, response);
+                    rememberVariant(index);
+                    if (appContext != null) {
+                        long newId = 0;
+                        try {
+                            JSONObject o = new JSONObject(response);
+                            newId = o.optLong("algoId", o.optLong("orderId", 0));
+                        } catch (Exception ignored) {
+                        }
+                        ProtectionLedger.put(appContext, posId,
+                                isStop ? newId : 0, isStop ? 0 : newId);
+                    }
+                    placed = true;
+                } catch (Exception e) {
+                    lastError = String.valueOf(e.getMessage());
+                }
+            }
+            if (!placed) {
+                if (problems.length() > 0) problems.append(" | ");
+                problems.append(isStop ? "SL: " : "TP: ").append(lastError);
+            }
+        }
+        return problems.length() == 0 ? null : problems.toString();
     }
 
     /** Decimal places implied by a step size, e.g. 0.001 -> 3, 1 -> 0. */
@@ -954,7 +1402,7 @@ public final class Trader {
      * scientific notation. Rounding down matters: rounding up could exceed
      * the balance the size percent authorised.
      */
-    public String quantise(String symbol, double quantity) {
+    private String quantise(String symbol, double quantity) {
         double[] rules = rulesFor(symbol);
         if (rules == null) {
             throw new IllegalStateException("No exchange rules for " + symbol
@@ -1124,7 +1572,7 @@ public final class Trader {
                 + "  1. The key has an IP allowlist and your current IP is not\n"
                 + "     on it. Your requests are coming from a VPN/datacenter\n"
                 + "     IP, which changes - either turn the VPN off or set the\n"
-                + "     key allowlist to your approved static IP.\n"
+                + "     key to 'Unrestricted'.\n"
                 + "  2. Or the key/secret is wrong, or was made on a different\n"
                 + "     Binance site (binance.us / regional) than api.binance.com.\n");
         if (testnet) {

@@ -64,11 +64,6 @@ public final class Strategy {
     public boolean[] enabled = {true, true, true, true, true, true};
     public double[] sensitivity = {55, 45, 55, 45, 72, 55};
 
-    public Strategy copy() {
-        Strategy s=new Strategy(); s.mode=mode; s.entryScore=entryScore; s.minRiskReward=minRiskReward;
-        s.enabled=enabled.clone(); s.sensitivity=sensitivity.clone(); return s;
-    }
-
     public static int modeIndex(String mode) {
         for (int i = 0; i < MODES.length; i++) if (MODES[i].equals(mode)) return i;
         return 1;

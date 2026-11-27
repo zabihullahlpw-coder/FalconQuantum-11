@@ -111,7 +111,6 @@ public class ScanService extends Service {
         super.onCreate();
         paper = new Paper(this);
         journal = new Journal(this);
-        paper.reconcileJournal();
         createChannels();
     }
 
@@ -126,7 +125,7 @@ public class ScanService extends Service {
         // Android can restart a sticky service after killing the process.
         // If scanning is not on, this must not resurrect itself and post a
         // notification claiming to scan.
-        if ((!scanningOn(this) && !hasTrackedPositions()) || !isEnabled(this)) {
+        if (!scanningOn(this) || !isEnabled(this)) {
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -170,7 +169,7 @@ public class ScanService extends Service {
                     } catch (Throwable ignored) {
                     }
                     try {
-                        Thread.sleep(15000);
+                        Thread.sleep(3000);
                     } catch (InterruptedException e) {
                         return;
                     }
@@ -182,19 +181,84 @@ public class ScanService extends Service {
     }
 
     private void enforceManagedStops() {
-        String env=getSharedPreferences(PREFS,Context.MODE_PRIVATE).getString("active_env","PAPER");
-        ProtectionMonitor.runAll(this);
-    }
-    private boolean hasTrackedPositions() {
-        String env=getSharedPreferences(PREFS,Context.MODE_PRIVATE).getString("active_env","PAPER");
-        for(String e:new String[]{"PAPER","DEMO","LIVE"}) for(Journal.Trade t:journal.history(e,10000)) if(t.closedAt==0&&!"ENTRY_REJECTED".equals(t.status))return true;
-        return false;
+        SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String env = prefs.getString("active_env", "PAPER");
+        if ("PAPER".equals(env)) return;
+        Settings cfg = Settings.load(this, env);
+        // The operator has taken exits away from Falcon entirely. With no
+        // exchange stop on this account that means the position is running
+        // unprotected, which is their call to make - but nothing here will
+        // send a close order.
+        if (cfg.neverCloseByFalcon) return;
+        if (!cfg.managedStop) return;
+
+        Trader trader = Trader.forEnvironment(this, cfg);
+        if (trader == null) return;
+        try {
+            for (Trader.Position held : trader.positions()) {
+                String raw = prefs.getString("plan_" + env + "_" + held.symbol, "");
+                if (raw == null || raw.indexOf('|') < 0) continue;
+                double sl, tp;
+                try {
+                    String[] parts = raw.split("\\|");
+                    sl = Double.parseDouble(parts[0]);
+                    tp = Double.parseDouble(parts[1]);
+                } catch (Exception e) {
+                    continue;
+                }
+                boolean isLong = "LONG".equals(held.side);
+                double mark = held.mark > 0 ? held.mark : held.entry;
+                // Do not act in the first moments of a position.
+                //
+                // Entry fills at a slightly different price than the scan
+                // saw, so a stop computed from the scan price can already
+                // look breached the instant the trade opens. That produced
+                // positions that appeared to open and close by themselves.
+                Long openedAt = openedAtMillis.get(env + ":" + held.symbol);
+                if (openedAt == null) {
+                    openedAtMillis.put(env + ":" + held.symbol,
+                            Long.valueOf(System.currentTimeMillis()));
+                    continue;
+                }
+                if (System.currentTimeMillis() - openedAt.longValue() < 30000L) continue;
+
+                // A level on the wrong side of the market is a bad level,
+                // not an instruction to close immediately.
+                if (isLong && sl > 0 && sl >= mark && held.entry > 0 && mark >= held.entry) continue;
+                if (!isLong && sl > 0 && sl <= mark && held.entry > 0 && mark <= held.entry) continue;
+
+                boolean stopHit = sl > 0 && (isLong ? mark <= sl : mark >= sl);
+                boolean targetHit = tp > 0 && (isLong ? mark >= tp : mark <= tp);
+                if (!stopHit && !targetHit) continue;
+
+                String error = trader.emergencyClose(held.symbol, isLong, held.qty);
+                if (error == null) {
+                    trader.cancelProtection(held.symbol);
+                    openedAtMillis.remove(env + ":" + held.symbol);
+                    journal.recordClose(env, held.symbol, mark, held.unrealised,
+                            stopHit ? "STOP" : "TARGET");
+                    if (cfg.notifyClose) {
+                        notifyTrade((stopHit ? "Stop hit: " : "Target hit: ") + held.symbol,
+                                "Closed at " + mark + " by the Falcon-held stop");
+                    }
+                } else {
+                    journal.recordError(env, held.symbol, "Close failed", error, "managed stop");
+                    // A position that could not be closed is a real emergency,
+                    // so this one exception does reach the shade.
+                    notifyTrade("COULD NOT CLOSE " + held.symbol, error + " — close it manually");
+                }
+                if (error == null) {
+                    prefs.edit().remove("plan_" + env + "_" + held.symbol).apply();
+                }
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     private void loop() {
         startStopWatcher();
         while (running) {
-            if (!scanningOn(this) && !hasTrackedPositions()) {
+            if (!scanningOn(this)) {
                 // Scanning was stopped while a pass was queued.
                 running = false;
                 stopForeground(true);
@@ -203,8 +267,7 @@ public class ScanService extends Service {
             }
             long started = System.currentTimeMillis();
             try {
-                if(scanningOn(this)) scanOnce();
-                else updateOngoing("Monitoring protection; scanning paused");
+                scanOnce();
             } catch (Throwable t) {
                 updateOngoing("Scan error: " + String.valueOf(t.getMessage()));
             }
@@ -252,6 +315,29 @@ public class ScanService extends Service {
                 .getStringSet("blocked_symbols", new java.util.HashSet<String>()));
         updateOngoing("Scanning " + env + " · " + cfg.timeframe + "…");
 
+        // Keep simulated positions honest while the app is closed.
+        if ("PAPER".equals(env)) {
+            List<Paper.Trade> open = paper.trades(env, "OPEN", 50);
+            for (int i = 0; i < open.size(); i++) {
+                Paper.Trade t = open.get(i);
+                try {
+                    double price = Binance.price(t.symbol);
+                    if (price > 0) {
+                        String outcome = paper.markToMarket(t, price);
+                        if (!"OPEN".equals(outcome)) {
+                            journal.recordClose(env, t.symbol, price,
+                                    paper.unrealised(t, price), outcome);
+                            Settings pcfg = Settings.load(this, env);
+                            if (pcfg.notifyClose) {
+                                notifyTrade("Closed: " + t.symbol, outcome + " at " + price);
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
         final List<String> symbols = new ArrayList<String>();
         List<Binance.Market> markets = null;
         try {
@@ -289,7 +375,8 @@ public class ScanService extends Service {
                         Double qv = volumes.get(sym);
                         Binance.Candles k = Binance.klines(sym, fcfg.timeframe, 200);
                         if (Binance.isBlocked(sym)) return;
-                        Engine.Row r = EntryTiming.analyse(sym,k,qv==null?20000000:qv.doubleValue(),fstrategy,fcfg);
+                        Engine.Row r = Engine.analyseEntry(sym, k,
+                                qv == null ? 20000000 : qv.doubleValue(), fstrategy, fcfg);
                         if (r != null) results.add(r);
                     } catch (Exception ignored) {
                     }
@@ -344,9 +431,79 @@ public class ScanService extends Service {
      * still working: protect it once it has, close it when the reason has
      * gone, and pull an unreachable target closer.
      */
-    private void managePositions(String env,Settings cfg,Strategy strategy) {
-        // Exit experiments are evaluated in PAPER/replay; existing LIVE exits are not silently changed.
-        // The independent watcher owns exchange verification and safety closures.
+    private void managePositions(String env, Settings cfg, Strategy strategy) {
+        if ("PAPER".equals(env)) return;
+        Trader trader = Trader.forEnvironment(this, cfg);
+        if (trader == null) return;
+
+        try {
+            for (Trader.Position held : trader.positions()) {
+                boolean isLong = "LONG".equals(held.side);
+                double mark = held.mark > 0 ? held.mark : held.entry;
+                double moved = isLong ? mark - held.entry : held.entry - mark;
+
+                String peakKey = env + ":" + held.symbol;
+                Double previousPeak = peakMove.get(peakKey);
+                double peak = Math.max(moved, previousPeak == null ? 0 : previousPeak);
+                peakMove.put(peakKey, Double.valueOf(peak));
+
+                double[] plan = storedPlan(env, held.symbol);
+                double stop = plan[0] > 0 ? plan[0]
+                        : (isLong ? held.entry * 0.99 : held.entry * 1.01);
+                double target = plan[1] > 0 ? plan[1]
+                        : (isLong ? held.entry * 1.02 : held.entry * 0.98);
+
+                // Is the original reason for the trade still there?
+                Momentum.Reading now = null;
+                boolean thesisValid = true;
+                try {
+                    Binance.Candles c = Binance.klines(held.symbol, cfg.timeframe, 200);
+                    Engine.Row fresh = Engine.analyse(held.symbol, c, 20000000, strategy,
+                            cfg.allowShort, "NORMAL", cfg.timeframe, false);
+                    if (fresh != null) {
+                        now = fresh.momentum;
+                        thesisValid = held.side.equals(fresh.side);
+                    }
+                } catch (Exception ignored) {
+                }
+
+                PositionManager.Verdict v = PositionManager.review(isLong, held.entry, mark,
+                        stop, target, peak, now, thesisValid, cfg.exitOnlyBySlTp);
+
+                if (v.closes() && (cfg.exitOnlyBySlTp || cfg.neverCloseByFalcon)) {
+                    // Belt and braces: the verdict should never ask to close
+                    // under this setting, and if it somehow does, it is
+                    // ignored rather than overriding the operator.
+                    journal.recordError(env, held.symbol, "Close suppressed",
+                            v.reason, "exits are owned by SL/TP");
+                } else if (v.closes()) {
+                    String error = trader.emergencyClose(held.symbol, isLong, held.qty);
+                    if (error == null) {
+                        trader.cancelProtection(held.symbol);
+                        peakMove.remove(peakKey);
+                        journal.recordClose(env, held.symbol, mark, held.unrealised, "MANAGED");
+                        if (cfg.notifyClose) {
+                            notifyTrade("Closed " + held.symbol, v.reason);
+                        }
+                    } else {
+                        journal.recordError(env, held.symbol, "Managed close failed",
+                                error, v.reason);
+                    }
+                } else if (v.retargets()) {
+                    double newStop = v.newStop > 0 ? v.newStop : stop;
+                    double newTarget = v.newTarget > 0 ? v.newTarget : target;
+                    String error = trader.retarget(held, newStop, newTarget);
+                    if (error == null) {
+                        savePlan(env, held.symbol, newStop, newTarget);
+                    } else {
+                        journal.recordError(env, held.symbol, "Retarget failed", error, v.reason);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            journal.recordError(env, "", "Position review failed",
+                    String.valueOf(e.getMessage()), "manager");
+        }
     }
 
     private double[] storedPlan(String env, String symbol) {
@@ -367,7 +524,50 @@ public class ScanService extends Service {
     }
 
     /** Re-protect anything bare. Deliberately infrequent. */
-    private void sweepProtection(String env) { /* independent 15s watcher */ }
+    private void sweepProtection(String env) {
+        long sinceSweep = System.currentTimeMillis() - lastSweepAt;
+        if (sinceSweep < 60000L) return;
+        lastSweepAt = System.currentTimeMillis();
+
+        try {
+            Settings envCfg = Settings.load(this, env);
+            Trader writer = Trader.forEnvironment(this, envCfg);
+            if (writer != null) {
+                writer.importExistingProtection();
+                writer.reconcileProtection();
+                for (Trader.Position held : writer.positions()) {
+                    String raw = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                            .getString("plan_" + env + "_" + held.symbol, "");
+                    double sl = 0, tp = 0;
+                    if (raw != null && raw.indexOf('|') > 0) {
+                        try {
+                            String[] parts = raw.split("\\|");
+                            sl = Double.parseDouble(parts[0]);
+                            tp = Double.parseDouble(parts[1]);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    String problem = writer.ensureProtection(held, sl, tp);
+                    if (problem == null) {
+                        writer.tidyProtection(held.symbol);
+                        continue;
+                    }
+                    journal.recordError(env, held.symbol, "Protection failed", problem, "sweep");
+
+                    writer.rememberStopSupport(false);
+                    // Deliberately no close here.
+                    //
+                    // This was a SECOND stop-enforcement path, without the
+                    // post-entry grace period, the wrong-side check or the
+                    // never-close setting. It is why positions kept closing
+                    // themselves after those guards were added elsewhere.
+                    // Stop enforcement lives in exactly one place now:
+                    // enforceManagedStops(), on its own watcher thread.
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
 
     /**
      * Unattended entries. PAPER is simulated and safe to automate. DEMO and
@@ -376,17 +576,130 @@ public class ScanService extends Service {
      * that opens real positions while sitting in a pocket should never be
      * the default.
      */
-    private void maybeAutoTrade(String env,Settings cfg,Engine.Row r,Strategy strategy) {
-        if(!cfg.autoTrade)return;
-        if("PAPER".equals(env)) {
-            String error=paper.open(cfg,r,strategy);
-            if(error==null&&cfg.notifyOpen)notifyTrade("PAPER opened "+r.symbol,"See HISTORY for modeled fees and execution");
+    private void maybeAutoTrade(String env, Settings cfg, Engine.Row r, Strategy strategy) {
+        if (!cfg.autoTrade || !Engine.directionCurrent(r, Settings.load(this, env))) return;
+        if ("PAPER".equals(env)) {
+            if (paper.open(cfg, r, strategy) == null) {
+                notifyTrade("PAPER opened " + r.symbol + " " + r.side,
+                        "entry " + r.entry + " · stop " + r.stop + " · tp " + r.target);
+            }
             return;
         }
-        if(!backgroundAutoTrade(this))return;
-        String result=Execution.open(this,cfg,r,strategy);
-        if(result.startsWith("Opened")&&cfg.notifyOpen)notifyTrade(env+" "+r.symbol,result);
-        else journal.recordError(env,r.symbol,"Entry decision",result,"background");
+        if (!backgroundAutoTrade(this)) return;
+        if (!Trader.hasKeys(this, env)) return;
+        if ("LIVE".equals(env) && !Trader.liveArmed(this)) return;
+        try {
+            Trader trader = Trader.forEnvironment(this, cfg);
+            if (trader == null) return;
+            // Same preflight unattended: never open what cannot be protected.
+            if (!trader.probeStopSupport(r.symbol) && !cfg.managedStop) return;
+
+            // Limit and duplicate checks read the exchange, the only count
+            // that cannot drift. Unattended entries must respect the cap.
+            java.util.List<Trader.Position> openNow = trader.positions();
+            if (openNow.size() >= cfg.maxPositions) {
+                journal.recordError(env, r.symbol, "Position limit",
+                        openNow.size() + " of " + cfg.maxPositions + " already open",
+                        "background");
+                return;
+            }
+            for (Trader.Position held : openNow) {
+                if (r.symbol.equals(held.symbol)) return;
+            }
+
+            // Size against the live price, exactly like the foreground path.
+            double price = trader.markPrice(r.symbol);
+            if (price <= 0) price = r.price;
+            double free = trader.usdtBalance();
+            double margin = free * (cfg.sizePercent / 100.0);
+            double notional = margin * cfg.notionalMultiplier();
+            double qty = notional / price;
+            if (trader.validateOrder(r.symbol, qty, price) != null) return;
+            if (cfg.isFutures()) {
+                trader.setMarginMode(r.symbol, cfg.marginMode);
+                trader.setLeverage(r.symbol, cfg.leverage);
+            }
+            if (!Engine.directionCurrent(r, Settings.load(this, env))) return;
+            trader.marketOrder(r.symbol, "LONG".equals(r.side), qty);
+
+            boolean isLong = "LONG".equals(r.side);
+            double risk = Math.abs(r.entry - r.stop);
+            if (risk <= 0) risk = price * 0.01;
+            double sl = isLong ? price - risk : price + risk;
+            double reward = r.reversed ? Math.abs(r.target - r.entry) : risk * 2;
+            double tp = isLong ? price + reward : price - reward;
+            getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .putString("plan_" + env + "_" + r.symbol, sl + "|" + tp).apply();
+            String guard = trader.attachStopAndTarget(r.symbol, isLong, sl, tp, qty, price);
+
+            if (guard == null) {
+                trader.rememberStopSupport(true);
+                trader.tidyProtection(r.symbol);
+                journal.recordOpen(env, r.symbol, r.side, cfg.leverage, cfg.marginMode,
+                        price, qty, notional, sl, tp, "Binance");
+                if (cfg.notifyOpen) {
+                    notifyTrade(env + " opened " + r.symbol + " " + r.side,
+                            String.format("%.2f", notional) + " USDT · " + cfg.leverage + "x "
+                                    + cfg.marginMode + " · SL/TP placed");
+                }
+            } else {
+                // Never leave an unattended position without a stop.
+                trader.rememberStopSupport(false);
+                if (cfg.managedStop) {
+                    journal.recordOpen(env, r.symbol, r.side, cfg.leverage, cfg.marginMode,
+                            price, qty, notional, sl, tp, "Falcon-held");
+                    if (cfg.notifyOpen) {
+                        notifyTrade(env + " opened " + r.symbol + " " + r.side,
+                                "Falcon-held stop at " + sl + " — only active while Falcon runs");
+                    }
+                    return;
+                }
+                // No exchange stop is possible on this account and the
+                // operator has already accepted the fallback. Opening and
+                // then immediately closing was the visible symptom of this
+                // branch running anyway.
+                if (cfg.neverCloseByFalcon) {
+                    journal.recordOpen(env, r.symbol, r.side, cfg.leverage, cfg.marginMode,
+                            price, qty, notional, sl, tp, "UNPROTECTED");
+                    journal.recordError(env, r.symbol, "Opened without protection",
+                            "Binance refused a stop and Falcon is set never to close. "
+                                    + "This position has no stop of any kind.",
+                            "neverCloseByFalcon");
+                    if (cfg.notifyOpen) {
+                        notifyTrade(env + " opened " + r.symbol + " " + r.side,
+                                "NO STOP — Binance refused one and Falcon will not close");
+                    }
+                    return;
+                }
+                if (!cfg.askBeforeFalconStop) {
+                    cfg.managedStop = true;
+                    cfg.save(this);
+                    journal.recordOpen(env, r.symbol, r.side, cfg.leverage, cfg.marginMode,
+                            price, qty, notional, sl, tp, "Falcon-held");
+                    if (cfg.notifyOpen) {
+                        notifyTrade(env + " opened " + r.symbol + " " + r.side,
+                                "Falcon-held stop at " + sl);
+                    }
+                    return;
+                }
+                String closeError = trader.emergencyClose(r.symbol, isLong, qty);
+                notifyTrade(closeError == null
+                                ? "Closed again: " + r.symbol
+                                : "DANGER: " + r.symbol + " open with NO stop",
+                        closeError == null
+                                ? "Binance refused the stop order, so the position was closed."
+                                : "Close it manually now — " + closeError);
+            }
+        } catch (Exception e) {
+            String raw = String.valueOf(e.getMessage());
+            journal.recordError(env, r.symbol, "Order failed", raw, "background");
+            if (raw.contains("-4411")) {
+                Binance.blockSymbol(r.symbol);
+                getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                        .putStringSet("blocked_symbols", Binance.blockedSymbols()).apply();
+            }
+            // Deliberately not notified: failures belong in the ERRORS tab.
+        }
     }
 
     // ------------------------------------------------------------ notifications

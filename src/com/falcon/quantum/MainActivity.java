@@ -1,5 +1,6 @@
 package com.falcon.quantum;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
@@ -15,6 +16,11 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
@@ -34,18 +40,19 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Falcon Quantum mobile - self-contained trading and analysis app.
+ * Falcon Quantum mobile - full desktop parity on the phone.
  *
  * PAPER / DEMO / LIVE are fully separate environments, each with its own
  * market type (Spot or Futures), leverage, margin mode, direction
  * permissions, risk settings, watchlist and ledger.
  *
  * PAPER is simulated locally. DEMO trades Binance testnet with fake funds.
- * This safety-preview build does not open new LIVE positions.
+ * LIVE can place real orders but only after the operator arms it explicitly.
  */
 public class MainActivity extends Activity {
 
     private static final String PREFS = "falcon_prefs";
+    private static final String KEY_URL = "server_url";
     private static final String KEY_ENV = "active_env";
 
     private static final int BG = 0xFF070C16;
@@ -59,8 +66,8 @@ public class MainActivity extends Activity {
     private static final int AMBER = 0xFFF2B84B;
 
     private LinearLayout envBar, tabBar, content;
-    private ScrollView pageScroll;
     private TextView header, statusLine;
+    private WebView webView;
 
     private Strategy strategy;
     private Settings cfg;
@@ -79,20 +86,16 @@ public class MainActivity extends Activity {
     private long nextScanAt = 0;
     private int scanCycles = 0;
     private Runnable scanTask, tickTask;
-    private Runnable protectionTask;
-    private volatile boolean protectionBusy=false;
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         paper = new Paper(this);
         journal = new Journal(this);
-        paper.reconcileJournal();
         pool = Executors.newFixedThreadPool(4);
         env = prefs().getString(KEY_ENV, "PAPER");
         strategy = Strategy.load(this);
         cfg = Settings.load(this, env);
-        SecureKeys.purgeRetiredDesktopLink(this);
 
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
@@ -135,14 +138,21 @@ public class MainActivity extends Activity {
         tabScroll.setPadding(dp(10), 0, dp(10), dp(6));
         root.addView(tabScroll);
 
-        pageScroll = new ScrollView(this);
-        pageScroll.setLayoutParams(new LinearLayout.LayoutParams(
+        ScrollView scroll = new ScrollView(this);
+        scroll.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(12), 0, dp(12), dp(28));
-        pageScroll.addView(content);
-        root.addView(pageScroll);
+        scroll.addView(content);
+        root.addView(scroll);
+
+        webView = new WebView(this);
+        webView.setVisibility(View.GONE);
+        webView.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        configureWebView();
+        root.addView(webView);
 
         setContentView(root);
         // Survive an app restart: if background scanning was left on, bring
@@ -197,7 +207,7 @@ public class MainActivity extends Activity {
     private void buildTabs() {
         tabBar.removeAllViews();
         String[] tabs = {"SCAN", "HOLDING", "TRADES", "HISTORY", "LEARN", "ERRORS",
-                "MARKET", "STRATEGY", "COINS", "ACCOUNT"};
+                "MARKET", "STRATEGY", "COINS", "ACCOUNT", "PC"};
         for (int i = 0; i < tabs.length; i++) {
             final String t = tabs[i];
             boolean active = t.equals(tab);
@@ -294,7 +304,11 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         statusLine.setText(env + " · " + cfg.describe());
 
-        pageScroll.setVisibility(View.VISIBLE);
+        if ("PC".equals(t)) {
+            renderPc();
+            return;
+        }
+        webView.setVisibility(View.GONE);
         content.setVisibility(View.VISIBLE);
 
         if ("HOLDING".equals(t)) {
@@ -386,9 +400,7 @@ public class MainActivity extends Activity {
             final Engine.Row r = lastRows.get(i);
             LinearLayout row = card();
             String gradeTag = "A".equals(r.grade) ? "  [A]" : ("B".equals(r.grade) ? "  [B]" : "");
-            row.addView(text(r.symbol + "   " + r.side
-                    + (r.directionReversed ? " (from " + r.signalSide + ")" : "")
-                    + "   " + r.score + "%   " + r.status
+            row.addView(text(r.symbol + "   " + r.side + "   " + r.score + "%   " + r.status
                     + gradeTag, 15,
                     "READY".equals(r.status) ? 0xFF3EE7AB
                             : "NEAR ENTRY".equals(r.status) ? AMBER : TEXT));
@@ -409,10 +421,7 @@ public class MainActivity extends Activity {
                         + "  (estimate, not a forecast)", 10,
                         r.momentumVeto == null ? MUTED : AMBER));
             }
-            row.addView(chartButton(r.symbol,r.entry,r.stop,r.target,r.reason+" | "+r.reasons+" | "+r.warnings));
-            if (r.ready && "LIVE".equals(env)) {
-                row.addView(text("Research signal only — LIVE entry disabled", 11, AMBER));
-            } else if (r.ready) {
+            if (r.ready) {
                 Button open = bigButton("OPEN " + r.side + " (" + env + ")", 0xFF1D3554);
                 open.setOnClickListener(new View.OnClickListener() {
                     public void onClick(View v) {
@@ -456,7 +465,6 @@ public class MainActivity extends Activity {
         nextScanAt = 0;
         if (scanTask != null) ui.removeCallbacks(scanTask);
         if (tickTask != null) ui.removeCallbacks(tickTask);
-        if (protectionTask != null) ui.removeCallbacks(protectionTask);
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (why != null) statusLine.setText(why);
         if ("SCAN".equals(tab)) show("SCAN");
@@ -484,7 +492,6 @@ public class MainActivity extends Activity {
     /** Refreshes the countdown once a second while waiting. */
     private void startTicker() {
         if (tickTask != null) ui.removeCallbacks(tickTask);
-        if (protectionTask != null) ui.removeCallbacks(protectionTask);
         tickTask = new Runnable() {
             public void run() {
                 if (!autoScan) return;
@@ -531,7 +538,7 @@ public class MainActivity extends Activity {
                         try {
                             Binance.Candles k = Binance.klines(sym, cfg.timeframe, 200);
                             if (qv <= 0) qv = 20000000;
-                            Engine.Row r = EntryTiming.analyse(sym, k, qv, strategy, cfg);
+                            Engine.Row r = Engine.analyseEntry(sym, k, qv, strategy, cfg);
                             if (r != null && !Binance.isBlocked(sym)) {
                                 // Respect this environment's direction permissions.
                                 if ("LONG".equals(r.side) && !cfg.allowLong) continue;
@@ -555,7 +562,9 @@ public class MainActivity extends Activity {
                     public void run() {
                         scanning = false;
                         lastRows.clear();
-                        lastRows.addAll(found);
+                        for (Engine.Row row : found) {
+                            if (Engine.directionCurrent(row, cfg)) lastRows.add(row);
+                        }
                         java.util.Collections.sort(lastRows, new java.util.Comparator<Engine.Row>() {
                             public int compare(Engine.Row a, Engine.Row b) {
                                 if (a.ready != b.ready) return a.ready ? -1 : 1;
@@ -595,8 +604,8 @@ public class MainActivity extends Activity {
     /**
      * Open qualifying setups without waiting for a tap.
      *
-     * PAPER writes to the local ledger. DEMO uses testnet order execution;
-     * LIVE new entries are disabled. Only one DEMO entry is started per
+     * PAPER writes to the local ledger. DEMO and LIVE go through the real
+     * order path, which is asynchronous, so only one entry is started per
      * scan cycle: firing several at once would race on the same balance and
      * could blow past the position limit. With a 5s cycle the limit still
      * fills within seconds.
@@ -605,19 +614,22 @@ public class MainActivity extends Activity {
         if (!cfg.autoTrade || autoOpening) return;
 
         if ("PAPER".equals(env)) {
-            if(autoOpening)return;autoOpening=true;
-            final Settings snapshot=Settings.load(this,env);final List<Engine.Row> rows=new ArrayList<Engine.Row>(lastRows);
-            pool.execute(new Runnable(){public void run(){
-                int count=0;for(Engine.Row r:rows)if(r.ready&&paper.open(snapshot,r,strategy)==null)count++;
-                final int opened=count;ui.post(new Runnable(){public void run(){autoOpening=false;if(opened>0)toast("Opened "+opened+" PAPER trades");}});
-            }});return;
-        }
-
-        if ("LIVE".equals(env)) {
-            statusLine.setText("LIVE new entries disabled in safety preview.");
+            int opened = 0;
+            for (int i = 0; i < lastRows.size(); i++) {
+                Engine.Row r = lastRows.get(i);
+                if (!r.ready) continue;
+                if (paper.open(cfg, r, strategy) == null) opened++;
+            }
+            if (opened > 0) toast("Auto-opened " + opened + " PAPER position(s)");
+            if ("SCAN".equals(tab)) refresh();
             return;
         }
+
         if (!Trader.hasKeys(this, env)) return;
+        if ("LIVE".equals(env) && !Trader.liveArmed(this)) {
+            statusLine.setText("Auto-open is on but LIVE is not armed — see the ACCOUNT tab.");
+            return;
+        }
 
         // Highest score first; lastRows is already sorted that way.
         Engine.Row best = null;
@@ -643,22 +655,17 @@ public class MainActivity extends Activity {
     }
 
     private void confirmAndOpen(final Engine.Row r) {
-        if ("LIVE".equals(env)) {
-            toast("LIVE new entries are disabled in safety preview");
-            return;
-        }
         // Auto-open is an explicit standing instruction; asking every time
         // would defeat it.
         if (cfg.autoTrade) {
             openNow(r);
             return;
         }
-        String detail = r.symbol + "  " + r.side
-                + (r.directionReversed ? " (reversed from " + r.signalSide + ")" : "") + "\n"
+        String detail = r.symbol + "  " + r.side + "\n"
                 + cfg.describe() + "\n"
                 + "entry " + fmt(r.entry) + "\nstop " + fmt(r.stop) + "\ntarget " + fmt(r.target);
         if ("LIVE".equals(env)) {
-            detail += "\n\nLIVE new entries are blocked in this safety preview.";
+            detail += "\n\nLIVE uses real money.";
         }
         new AlertDialog.Builder(this)
                 .setTitle("Open " + env + " position")
@@ -673,40 +680,311 @@ public class MainActivity extends Activity {
 
     /** Opens a position without asking. Shared by auto-open and the dialog. */
     private void openNow(final Engine.Row r) {
+        if (!Engine.directionCurrent(r, cfg)) { toast("Direction changed. Scan again."); return; }
         if ("PAPER".equals(env)) {
-            final Settings snapshot=Settings.load(this,env);
-            pool.execute(new Runnable(){public void run(){
-                final String refusal=paper.open(snapshot,r,strategy);
-                ui.post(new Runnable(){public void run(){toast(refusal==null?"Opened "+r.symbol:"Refused: "+refusal);refresh();}});
-            }});return;
+            String refusal = paper.open(cfg, r, strategy);
+            if (refusal != null) {
+                toast("Refused: " + refusal);
+                refresh();
+            } else {
+                toast("Opened " + r.symbol + " " + r.side);
+                // A position opening is the one event worth navigating for.
+                show("TRADES");
+            }
+            return;
         }
         // DEMO and LIVE have no local ledger: the exchange is the single
         // source of truth. If the order cannot be sent, nothing is recorded.
-        if ("LIVE".equals(env)) {
-            toast("LIVE new entries are disabled in safety preview");
-            return;
-        }
         if (!Trader.hasKeys(this, env)) {
             toast("No API key saved for " + env + " - see the ACCOUNT tab");
+            return;
+        }
+        if ("LIVE".equals(env) && !Trader.liveArmed(this)) {
+            toast("LIVE order sending is not armed - see the ACCOUNT tab");
             return;
         }
         sendExchangeOrder(r);
     }
 
     /**
-     * Send a fake-funds testnet order for DEMO only. Position size is derived
+     * Send a real order for DEMO or armed LIVE. Position size is derived
      * from the exchange's own available balance - never from a simulated
      * one - and is refused if the account cannot cover it.
      */
     private void sendExchangeOrder(final Engine.Row r) {
-        final Settings snapshot=Settings.load(this,env);
-        statusLine.setText("Checking entry, account risk and protection…");
-        pool.execute(new Runnable() { public void run() {
-            final String result=Execution.open(MainActivity.this,snapshot,r,strategy);
-            ui.post(new Runnable() { public void run() {
-                autoOpening=false;statusLine.setText(result);toast(result);loadExchange();
-            }});
-        }});
+        final Settings snapshot = cfg;
+        statusLine.setText("Sending " + snapshot.env + " order…");
+        pool.execute(new Runnable() {
+            public void run() {
+                String msg;
+                try {
+                    Trader trader = Trader.forEnvironment(MainActivity.this, snapshot);
+                    if (trader == null) {
+                        msg = "Order sending is not available for " + snapshot.env;
+                    } else {
+                        // Size against the CURRENT price, not the scan price.
+                        // A scan price is the last closed candle and can be
+                        // minutes old; on a fast mover that overshoots the
+                        // percentage the operator chose.
+                        // If this account has already refused a stop order,
+                        // do not open anything else that cannot be protected.
+                        // Ask the exchange whether a stop is even possible
+                        // BEFORE committing money. Previously this was only
+                        // discovered after the entry filled, so a trade opened
+                        // and was closed again seconds later.
+                        boolean stopsOk = trader.probeStopSupport(r.symbol);
+                        Boolean stopsWork = Boolean.valueOf(stopsOk);
+                        if (!stopsOk && !snapshot.managedStop) {
+                            // Exits belong entirely to the operator: no stop
+                            // is placed and none will be enforced. Allowed,
+                            // but recorded and flagged after the fill.
+                            if (!snapshot.neverCloseByFalcon && snapshot.askBeforeFalconStop) {
+                                final Engine.Row pending = r;
+                                ui.post(new Runnable() {
+                                    public void run() {
+                                        autoOpening = false;
+                                        statusLine.setText("Binance refused every stop-order type.");
+                                        offerManagedStop(pending);
+                                    }
+                                });
+                                return;
+                            }
+                            // No prompt. This account cannot hold an exchange
+                            // stop, the answer never changes, so take the
+                            // fallback and carry on. Which stop is protecting
+                            // the trade stays visible on the position card.
+                            //
+                            // Unless exits have been taken away from Falcon
+                            // entirely, in which case the position runs with
+                            // no stop and is recorded as such after the fill.
+                            if (!snapshot.neverCloseByFalcon) {
+                                snapshot.managedStop = true;
+                                snapshot.save(MainActivity.this);
+                            }
+                        }
+
+                        // Safety stops come before anything else. A losing
+                        // run is when an automated system does the most
+                        // damage, so it is halted rather than left running.
+                        String halt = safetyHalt(snapshot);
+                        if (halt != null) {
+                            journal.recordError(snapshot.env, r.symbol, "Trading halted",
+                                    halt, "safety control");
+                            final String h = halt;
+                            ui.post(new Runnable() {
+                                public void run() {
+                                    autoOpening = false;
+                                    statusLine.setText(h);
+                                    showFullError("Trading halted", h);
+                                }
+                            });
+                            return;
+                        }
+
+                        // Count and duplicate checks both read from the
+                        // exchange, which is the only source that cannot drift
+                        // out of date. The limit used to be checked against a
+                        // cached list, so it let extra positions through.
+                        java.util.List<Trader.Position> openNow = trader.positions();
+                        if (openNow.size() >= snapshot.maxPositions) {
+                            msg = "Not opening " + r.symbol + ": " + openNow.size()
+                                    + " of " + snapshot.maxPositions
+                                    + " positions already open on the exchange.";
+                            journal.recordError(snapshot.env, r.symbol, "Position limit",
+                                    msg, "limit " + snapshot.maxPositions);
+                            final String limited = msg;
+                            ui.post(new Runnable() {
+                                public void run() {
+                                    autoOpening = false;
+                                    statusLine.setText(limited);
+                                }
+                            });
+                            return;
+                        }
+                        boolean alreadyOpen = false;
+                        for (Trader.Position held : openNow) {
+                            if (r.symbol.equals(held.symbol)) alreadyOpen = true;
+                        }
+                        if (alreadyOpen) {
+                            msg = r.symbol + " already has an open position — not opening a second one.";
+                            final String already = msg;
+                            ui.post(new Runnable() {
+                                public void run() {
+                                    autoOpening = false;
+                                    statusLine.setText(already);
+                                }
+                            });
+                            return;
+                        }
+
+                        double price = trader.markPrice(r.symbol);
+                        if (price <= 0) price = r.price;
+                        double free = trader.usdtBalance();
+                        double margin = free * (snapshot.sizePercent / 100.0);
+                        double notional = margin * snapshot.notionalMultiplier();
+                        double qty = notional / price;
+
+                        String problem = trader.validateOrder(r.symbol, qty, price);
+                        if (problem != null) {
+                            msg = problem;
+                        } else {
+                            if (snapshot.isFutures()) {
+                                trader.setMarginMode(r.symbol, snapshot.marginMode);
+                                trader.setLeverage(r.symbol, snapshot.leverage);
+                            }
+                            if (!Engine.directionCurrent(r, Settings.load(MainActivity.this, snapshot.env)))
+                                throw new IllegalStateException("Direction changed. Scan again.");
+                            trader.marketOrder(r.symbol, "LONG".equals(r.side), qty);
+
+                            // Rebuild stop and target around the real fill
+                            // price so protection matches what was opened.
+                            boolean isLong = "LONG".equals(r.side);
+                            double risk = Math.abs(r.entry - r.stop);
+                            if (risk <= 0) risk = price * 0.01;
+                            double sl = isLong ? price - risk : price + risk;
+                            double reward = r.reversed ? Math.abs(r.target - r.entry) : risk * 2;
+                            double tp = isLong ? price + reward : price - reward;
+                            rememberPlan(r.symbol, sl, tp);
+                            String guard = trader.attachStopAndTarget(r.symbol, isLong, sl, tp,
+                                    Double.parseDouble(String.valueOf(qty)), price);
+                            if (guard == null) {
+                                // Confirm with the exchange rather than trusting
+                                // that the request was accepted.
+                                try {
+                                    boolean[] have = trader.protectionPresent(r.symbol);
+                                    if (!have[0] || !have[1]) {
+                                        guard = "exchange shows "
+                                                + (have[0] ? "" : "no stop ")
+                                                + (have[1] ? "" : "no target");
+                                    }
+                                } catch (Exception ignored) {
+                                }
+                            }
+
+                            msg = "Opened " + r.symbol + " " + r.side + " "
+                                    + String.format("%.2f", notional) + " USDT @ " + fmt(price)
+                                    + " (" + snapshot.sizePercent + "% × "
+                                    + snapshot.leverage + "x)";
+                            if (guard == null) {
+                                trader.rememberStopSupport(true);
+                                trader.tidyProtection(r.symbol);
+                                journal.recordOpen(snapshot.env, r.symbol, r.side,
+                                        snapshot.leverage, snapshot.marginMode, price,
+                                        qty, notional, sl, tp, "Binance");
+                                msg += "\nSL " + fmt(sl) + " · TP " + fmt(tp)
+                                        + " placed on the exchange.";
+                            } else {
+                                // No stop means no trade. Closing costs a fee;
+                                // an unprotected 10x position can cost far more.
+                                trader.rememberStopSupport(false);
+                                if (snapshot.managedStop) {
+                                    // Operator accepted a Falcon-held stop.
+                                    // The level is already saved; the scan
+                                    // loop enforces it from here.
+                                    journal.recordOpen(snapshot.env, r.symbol, r.side,
+                                            snapshot.leverage, snapshot.marginMode, price,
+                                            qty, notional, sl, tp,
+                                            snapshot.neverCloseByFalcon
+                                                    ? "UNPROTECTED" : "Falcon-held");
+                                    if (snapshot.neverCloseByFalcon) {
+                                        journal.recordError(snapshot.env, r.symbol,
+                                                "Opened without protection",
+                                                "Binance refused a stop and Falcon is set "
+                                                        + "never to close. Nothing will close "
+                                                        + "this position except you.",
+                                                "neverCloseByFalcon");
+                                    }
+                                    msg += snapshot.neverCloseByFalcon
+                                            ? "\n\nNO STOP — nothing will close this position "
+                                              + "except you."
+                                            : "\n\nFALCON-HELD STOP at " + fmt(sl)
+                                            + " (Binance refused an exchange stop). This only "
+                                            + "works while Falcon is running.";
+                                    final String kept = msg;
+                                    ui.post(new Runnable() {
+                                        public void run() {
+                                            autoOpening = false;
+                                            statusLine.setText(kept);
+                                            showFullError("Position open — Falcon-held stop", kept);
+                                            loadExchange();
+                                        }
+                                    });
+                                    return;
+                                }
+                                // Only reachable when the operator has asked
+                                // to be prompted AND declined the fallback.
+                                // With the default settings a freshly opened
+                                // position is never flattened here.
+                                if (snapshot.neverCloseByFalcon || !snapshot.askBeforeFalconStop) {
+                                    journal.recordOpen(snapshot.env, r.symbol, r.side,
+                                            snapshot.leverage, snapshot.marginMode, price,
+                                            qty, notional, sl, tp, "UNPROTECTED");
+                                    msg += "\n\nNO EXCHANGE STOP — position left open. "
+                                            + "Nothing will close it except you.";
+                                    final String bare = msg;
+                                    ui.post(new Runnable() {
+                                        public void run() {
+                                            autoOpening = false;
+                                            statusLine.setText(bare);
+                                            showFullError("Position open with no stop", bare);
+                                            loadExchange();
+                                        }
+                                    });
+                                    return;
+                                }
+                                String closeError = trader.emergencyClose(
+                                        r.symbol, isLong, Double.parseDouble(String.valueOf(qty)));
+                                if (closeError == null) {
+                                    msg = "CLOSED AGAIN IMMEDIATELY: " + r.symbol
+                                            + " opened but Binance refused the stop order, so the "
+                                            + "position was flattened rather than left unprotected."
+                                            + "\n\nReason: " + guard;
+                                } else {
+                                    msg = "DANGER: " + r.symbol + " IS OPEN WITH NO STOP.\n\n"
+                                            + "Protection failed: " + guard
+                                            + "\n\nAutomatic close also failed: " + closeError
+                                            + "\n\nClose it manually in the Binance app NOW.";
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    String raw = String.valueOf(e.getMessage());
+                    journal.recordError(snapshot.env, r.symbol, "Order failed", raw,
+                            snapshot.sizePercent + "% x " + snapshot.leverage + "x");
+                    // A product-agreement refusal is permanent until the user
+                    // signs it, so stop offering the symbol rather than
+                    // failing on it again every scan.
+                    if (raw.contains("-4411")) {
+                        Binance.blockSymbol(r.symbol);
+                        prefs().edit().putStringSet("blocked_symbols",
+                                Binance.blockedSymbols()).apply();
+                    }
+                    msg = "Order FAILED: " + Trader.explain(raw);
+                }
+                final String m = msg;
+                final boolean failed = m.startsWith("Order FAILED")
+                        || m.startsWith("Too small") || m.contains("trades in steps of")
+                        || m.contains("minimum");
+                ui.post(new Runnable() {
+                    public void run() {
+                        autoOpening = false;
+                        statusLine.setText(m);
+                        if (failed) {
+                            lastOrderError = m;
+                            showFullError("Order not placed", m);
+                            refresh();
+                        } else {
+                            lastOrderError = null;
+                            toast(m);
+                            // Opened: show it. Nothing else navigates.
+                            show("TRADES");
+                        }
+                        loadExchange();
+                    }
+                });
+            }
+        });
     }
 
     // --------------------------------------------------------------- TRADES
@@ -736,7 +1014,7 @@ public class MainActivity extends Activity {
         head.addView(text("Realised " + fmt(realised) + "   ·   open " + paper.openCount(env)
                 + "   ·   " + wl[0] + "W / " + wl[1] + "L", 12,
                 realised >= 0 ? 0xFF3EE7AB : 0xFFFF8A90));
-        head.addView(text("Modeled fills, fees and funding. Liquidation is not simulated.", 11, MUTED));
+        head.addView(text("Simulated on this phone. Not a real account.", 11, MUTED));
         content.addView(head);
 
         Button refresh = bigButton("REFRESH PRICES", 0xFF1D3554);
@@ -770,7 +1048,6 @@ public class MainActivity extends Activity {
                     + "  ·  tp " + fmt(t.target) + liqText(t.liq)
                     + "\nmargin " + fmt(t.margin) + "  ·  notional " + fmt(t.notional), 11, MUTED));
 
-            row.addView(chartButton(t.symbol,t.entry,t.stop,t.target,t.policy+" | modeled PAPER position"));
             Button close = bigButton("CLOSE AT MARKET", PANEL2);
             close.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) {
@@ -796,11 +1073,11 @@ public class MainActivity extends Activity {
             public void onClick(View v) {
                 new AlertDialog.Builder(MainActivity.this)
                         .setTitle("Reset PAPER?")
-                        .setMessage("Restores the starting balance after all positions close. Trade evidence and today's loss halt are retained.")
+                        .setMessage("Deletes all PAPER trades and restores the starting balance.")
                         .setNegativeButton("Cancel", null)
                         .setPositiveButton("Reset", new DialogInterface.OnClickListener() {
                             public void onClick(DialogInterface d, int w) {
-                                try{paper.resetAccount(env);}catch(Exception e){toast(e.getMessage());}
+                                paper.resetAccount(env);
                                 show("TRADES");
                             }
                         }).show();
@@ -823,7 +1100,7 @@ public class MainActivity extends Activity {
         pool.execute(new Runnable() {
             public void run() {
                 try {
-                    double p = Binance.price(t.symbol,"FUTURES".equals(t.market));
+                    double p = Binance.price(t.symbol);
                     if (p > 0) paper.close(t, p, paper.unrealised(t, p), "CLOSED");
                 } catch (Exception ignored) {
                 }
@@ -844,7 +1121,7 @@ public class MainActivity extends Activity {
                 for (int i = 0; i < open.size(); i++) {
                     Paper.Trade t = open.get(i);
                     try {
-                        double p = Binance.price(t.symbol,"FUTURES".equals(t.market));
+                        double p = Binance.price(t.symbol);
                         if (p > 0) {
                             markCache.put(t.symbol, Double.valueOf(p));
                             paper.markToMarket(t, p);
@@ -906,6 +1183,15 @@ public class MainActivity extends Activity {
             content.addView(box);
         }
 
+        Button tidy = bigButton("CANCEL ALL CONDITIONAL ORDERS", PANEL2);
+        tidy.setTextColor(AMBER);
+        tidy.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                confirmCancelConditional();
+            }
+        });
+        content.addView(tidy);
+
         Button load = bigButton(liveLoading ? "LOADING…" : "LOAD FROM EXCHANGE", 0xFF1D3554);
         load.setEnabled(!liveLoading);
         load.setOnClickListener(new View.OnClickListener() {
@@ -943,30 +1229,31 @@ public class MainActivity extends Activity {
             // The stop and target always appear, whoever is enforcing them.
             // Not showing them when Binance refused left the operator unable
             // to see the levels their position was actually running against.
-            Journal.Trade tracked=journal.active(env,pos.symbol,pos.side);
-            double[] plan=tracked==null?new double[]{0,0}:new double[]{tracked.sl,tracked.tp};
-            Boolean onExchange = exchangeProtected.get(pos.symbol+"|"+pos.side);
+            double[] plan = recallPlan(pos.symbol);
+            Boolean onExchange = exchangeProtected.get(pos.symbol);
             if (plan[0] > 0 || plan[1] > 0) {
                 boolean live = Boolean.TRUE.equals(onExchange);
                 String levels = "SL " + (plan[0] > 0 ? fmt(plan[0]) : "—")
-                        + (live && plan[0] > 0 ? " verified" : "")
+                        + (live && plan[0] > 0 ? " Active" : "")
                         + "   ·   TP " + (plan[1] > 0 ? fmt(plan[1]) : "—")
-                        + (live && plan[1] > 0 ? " verified" : "");
+                        + (live && plan[1] > 0 ? " Active" : "");
                 row.addView(text(levels, 14,
                         Boolean.TRUE.equals(onExchange) ? 0xFF3EE7AB : AMBER));
                 if (Boolean.TRUE.equals(onExchange)) {
-                    row.addView(text("Last verified on Binance: " + Journal.when(lastExchangeLoadAt) + ". Refresh to check again.", 11, MUTED));
+                    row.addView(text("Protection: Binance Active — fires even if this phone "
+                            + "is off.", 11, MUTED));
                 } else {
-                    row.addView(text("Protection missing or UNKNOWN. New entries blocked until resolved.", 11, AMBER));
-                    String why = protectionError.get(pos.symbol+"|"+pos.side);
+                    row.addView(text("Held by Falcon — only fires while the app is running. "
+                            + "Checked every 3s.", 11, AMBER));
+                    String why = protectionError.get(pos.symbol);
                     if (why != null) {
-                        TextView w = text("Protection detail: " + why, 10, 0xFFFF8A90);
+                        TextView w = text("Binance refused: " + why, 10, 0xFFFF8A90);
                         w.setTextIsSelectable(true);
                         row.addView(w);
                     }
                 }
             } else {
-                row.addView(text("No verified trade plan. Inspect protection directly on Binance.", 14, 0xFFFF8A90));
+                row.addView(text("NO STOP SET — this position is unprotected.", 14, 0xFFFF8A90));
             }
             Button close = bigButton("CLOSE AT MARKET", PANEL2);
             close.setOnClickListener(new View.OnClickListener() {
@@ -980,21 +1267,120 @@ public class MainActivity extends Activity {
     }
 
     /**
+     * Clear every conditional order on the account, then let one clean pair
+     * be placed. Recovery for duplicates already sitting on the exchange.
+     */
+    private void confirmCancelConditional() {
+        new AlertDialog.Builder(this)
+                .setTitle("Cancel all conditional orders?")
+                .setMessage("This cancels every stop and take-profit order on " + env
+                        + ", for all symbols.\n\nYour open positions stay open — but they "
+                        + "will be unprotected until Falcon places a new stop on the next "
+                        + "refresh.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Cancel them", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        final Settings snapshot = cfg;
+                        statusLine.setText("Cancelling conditional orders…");
+                        pool.execute(new Runnable() {
+                            public void run() {
+                                String result;
+                                try {
+                                    Trader t = Trader.forEnvironment(MainActivity.this, snapshot);
+                                    if (t == null) {
+                                        result = "Order sending is not armed for " + snapshot.env;
+                                    } else {
+                                        java.util.Set<String> symbols =
+                                                new java.util.HashSet<String>();
+                                        for (Trader.Position held : t.positions()) {
+                                            symbols.add(held.symbol);
+                                        }
+                                        for (int i = 0; i < livePositions.size(); i++) {
+                                            symbols.add(livePositions.get(i).symbol);
+                                        }
+                                        for (String sym : symbols) {
+                                            t.cancelAllConditional(sym);
+                                        }
+                                        result = "Cleared conditional orders on "
+                                                + symbols.size() + " symbol(s).";
+                                    }
+                                } catch (Exception e) {
+                                    result = "Cleanup failed: " + e.getMessage();
+                                }
+                                final String r = result;
+                                ui.post(new Runnable() {
+                                    public void run() {
+                                        statusLine.setText(r);
+                                        toast(r);
+                                        loadExchange();
+                                    }
+                                });
+                            }
+                        });
+                    }
+                }).show();
+    }
+
+    /**
      * Finish any journal row whose position no longer exists, using
      * Binance's own realised-profit record as the source of truth.
      */
-    private void reconcileHistory(Trader trader,String environment,java.util.List<Trader.Position> live) {
-        Execution.reconcile(this,trader,Settings.load(this,environment),live);
+    private void reconcileHistory(Trader trader, String env,
+                                  java.util.List<Trader.Position> live) {
+        java.util.Set<String> open = new java.util.HashSet<String>();
+        for (int i = 0; i < live.size(); i++) open.add(live.get(i).symbol.toUpperCase());
+
+        java.util.List<Journal.Trade> rows = journal.history(env, 200);
+        for (int i = 0; i < rows.size(); i++) {
+            Journal.Trade t = rows.get(i);
+            if (!"OPEN".equals(t.status)) continue;
+            if (open.contains(t.symbol.toUpperCase())) continue;
+
+            double pnl = 0;
+            String how = "CLOSED";
+            try {
+                pnl = trader.realisedPnlSince(t.symbol, t.openedAt);
+            } catch (Exception e) {
+                journal.recordError(env, t.symbol, "History reconcile",
+                        String.valueOf(e.getMessage()), "realised pnl lookup");
+            }
+            double exit = t.entry;
+            if (t.qty > 0 && t.entry > 0) {
+                // Derive the exit implied by the realised result.
+                boolean isLong = "LONG".equals(t.side);
+                exit = isLong ? t.entry + pnl / t.qty : t.entry - pnl / t.qty;
+                if (t.sl > 0 && Math.abs(exit - t.sl) < Math.abs(exit - t.tp)) how = "STOP";
+                else if (t.tp > 0) how = "TARGET";
+            }
+            journal.recordClose(env, t.symbol, exit, pnl, how);
+        }
+    }
+
+    /** Null when trading may continue, otherwise the reason it must not. */
+    private String safetyHalt(Settings cfg) {
+        if (cfg.maxDailyLoss > 0) {
+            double today = journal.todayPnl(cfg.env);
+            if (today <= -Math.abs(cfg.maxDailyLoss)) {
+                return String.format("Daily loss limit reached: %.4f USDT lost today, "
+                        + "limit %.2f. Trading is halted until tomorrow.",
+                        today, cfg.maxDailyLoss);
+            }
+        }
+        if (cfg.maxConsecutiveLosses > 0) {
+            int run = journal.consecutiveLosses(cfg.env);
+            if (run >= cfg.maxConsecutiveLosses) {
+                return run + " losses in a row, limit " + cfg.maxConsecutiveLosses
+                        + ". Trading is paused — review the ERRORS and HISTORY tabs before "
+                        + "resuming, or raise the limit in MARKET.";
+            }
+        }
+        return null;
     }
 
     private void loadExchange() {
-        if(liveLoading)return;
         final Settings snapshot = cfg;
-        final java.util.Map<String,Boolean> checked=new java.util.HashMap<String,Boolean>();
-        final java.util.Map<String,String> failures=new java.util.HashMap<String,String>();
         liveLoading = true;
         liveError = null;
-        exchangeProtected.clear();
         lastExchangeLoadAt = System.currentTimeMillis();
         // Deliberately no redraw here. show() calls this while it is midway
         // through building the page; redrawing from inside re-entered show()
@@ -1026,7 +1412,7 @@ public class MainActivity extends Activity {
                         // Self-heal: any position without a stop gets one now.
                         // This is what covers a crash or a dropped connection
                         // between the entry and its protection.
-                        Trader writer = Trader.forManagement(MainActivity.this, snapshot);
+                        Trader writer = Trader.forEnvironment(MainActivity.this, snapshot);
                         if (writer != null) {
                             // Adopt anything Binance already holds, so a
                             // restart attaches rather than duplicating.
@@ -1043,23 +1429,20 @@ public class MainActivity extends Activity {
                             StringBuilder bare = new StringBuilder();
                             for (int i = 0; i < pos.size(); i++) {
                                 Trader.Position held = pos.get(i);
-                                Journal.Trade tracked=journal.active(snapshot.env,held.symbol,held.side);
-                                double[] plan=tracked==null?new double[]{0,0}:new double[]{tracked.sl,tracked.tp};
-                                String problem = tracked==null||!writer.accountKey().equals(tracked.accountKey)
-                                        ? "Untracked/legacy position: review existing orders manually"
-                                        : writer.ensureProtection(held, plan[0], plan[1]);
-                                checked.put(held.symbol+"|"+held.side, Boolean.valueOf(problem == null));
+                                double[] plan = recallPlan(held.symbol);
+                                String problem = writer.ensureProtection(held, plan[0], plan[1]);
+                                exchangeProtected.put(held.symbol, Boolean.valueOf(problem == null));
                                 if (problem == null) {
                                     // Protection is in place: drop any earlier
                                     // failure so a stale message cannot linger.
-                                    failures.remove(held.symbol+"|"+held.side);
+                                    protectionError.remove(held.symbol);
                                     if (lastOrderError != null
                                             && lastOrderError.contains(held.symbol)) {
                                         lastOrderError = null;
                                     }
                                     writer.tidyProtection(held.symbol);
                                 } else {
-                                    failures.put(held.symbol+"|"+held.side, problem);
+                                    protectionError.put(held.symbol, problem);
                                     journal.recordError(snapshot.env, held.symbol,
                                             "Protection failed", problem, "sweep");
                                     writer.rememberStopSupport(false);
@@ -1073,7 +1456,8 @@ public class MainActivity extends Activity {
                             // period after entry and the never-close setting
                             // respected.
                             if (bare.length() > 0) {
-                                err = "Protection unverified: " + bare + ". Review the recorded API response. Check protection "
+                                err = "UNPROTECTED: " + bare + " have no stop on the exchange and "
+                                        + "Binance refuses to accept one from the API. Close them "
                                         + "or set TP/SL yourself in the Binance app.";
                             }
                         }
@@ -1087,9 +1471,6 @@ public class MainActivity extends Activity {
                 ui.post(new Runnable() {
                     public void run() {
                         liveLoading = false;
-                        if(!snapshot.env.equals(env))return;
-                        exchangeProtected.clear();exchangeProtected.putAll(checked);
-                        protectionError.clear();protectionError.putAll(failures);
                         livePositions = fpos;
                         liveFree = ffree;
                         liveWallet = fwallet;
@@ -1116,10 +1497,18 @@ public class MainActivity extends Activity {
                             public void run() {
                                 String msg;
                                 try {
-                                    Trader t = Trader.forManagement(MainActivity.this, snapshot);
+                                    Trader t = Trader.forEnvironment(MainActivity.this, snapshot);
                                     if (t == null) msg = "Order sending is not armed for " + snapshot.env;
                                     else {
-                                        Execution.close(MainActivity.this,t,snapshot,pos,"MANUAL","User pressed CLOSE NOW");
+                                        t.closePosition(pos);
+                                        // Clear the stop so it cannot trigger
+                                        // later and re-open the trade.
+                                        t.cancelProtection(pos.symbol);
+                                        ProtectionLedger.clear(MainActivity.this, snapshot.env);
+                                        journal.recordClose(snapshot.env, pos.symbol,
+                                                pos.mark, pos.unrealised, "CLOSED");
+                                        prefs().edit()
+                                                .remove("plan_" + env + "_" + pos.symbol).apply();
                                         msg = "Close order sent for " + pos.symbol;
                                     }
                                 } catch (Exception e) {
@@ -1151,7 +1540,7 @@ public class MainActivity extends Activity {
         LinearLayout head = card();
         head.addView(text(env + " open positions", 16, TEXT));
         if ("PAPER".equals(env)) {
-            head.addView(text("Use TRADES for PAPER positions and costed history. Exit experiments run in PAPER.",12,MUTED));
+            head.addView(text("Position management runs on DEMO and LIVE.", 12, MUTED));
             content.addView(head);
             return;
         }
@@ -1181,11 +1570,10 @@ public class MainActivity extends Activity {
         for (int i = 0; i < livePositions.size(); i++) {
             final Trader.Position pos = livePositions.get(i);
             boolean isLong = "LONG".equals(pos.side);
-            Journal.Trade tracked=journal.active(env,pos.symbol,pos.side);
-            double[] plan=tracked==null?new double[]{0,0}:new double[]{tracked.sl,tracked.tp};
+            double[] plan = recallPlan(pos.symbol);
             double mark = pos.mark > 0 ? pos.mark : pos.entry;
-            double stop = plan[0];
-            double target = plan[1];
+            double stop = plan[0] > 0 ? plan[0] : (isLong ? pos.entry * 0.99 : pos.entry * 1.01);
+            double target = plan[1] > 0 ? plan[1] : (isLong ? pos.entry * 1.02 : pos.entry * 0.98);
 
             Double peak = peakMove.get(pos.symbol);
             double moved = isLong ? mark - pos.entry : pos.entry - mark;
@@ -1206,9 +1594,8 @@ public class MainActivity extends Activity {
                         ? "   ·   given back " + Math.round(v.drawdownFromPeak) + "% from best"
                         : ""), 12,
                     v.drawdownFromPeak >= 50 ? AMBER : MUTED));
-            row.addView(text("Shadow only: "+v.reason, 11, v.closes() ? 0xFFFF8A90 : MUTED));
+            row.addView(text(v.reason, 11, v.closes() ? 0xFFFF8A90 : MUTED));
 
-            row.addView(chartButton(pos.symbol,pos.entry,stop,target,"Position plan | "+cfg.exitPolicy+" | "+v.reason));
             Button close = bigButton("CLOSE NOW", PANEL2);
             close.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v2) {
@@ -1219,7 +1606,13 @@ public class MainActivity extends Activity {
             content.addView(row);
         }
 
-        content.addView(text("Displayed manager suggestions are a shadow comparison only. Exchange positions retain their original brackets; safety closures are logged separately.",11,MUTED));
+        content.addView(text(cfg.exitOnlyBySlTp
+                ? "Exits belong to the stop and target. Falcon only moves the stop up to "
+                  + "lock in profit — it will not close a position because a reading "
+                  + "weakened."
+                : "Falcon may close a position early when it has given back most of its "
+                  + "gain or lost its reason. Turn on 'Only SL and TP close positions' in "
+                  + "MARKET to stop that.", 11, MUTED));
     }
 
     /** Best favourable move seen per symbol, for give-back detection. */
@@ -1231,10 +1624,6 @@ public class MainActivity extends Activity {
         double[] sum = journal.summary(env);
         LinearLayout head = card();
         head.addView(text(env + " history", 16, TEXT));
-        head.addView(text("Totals include only reconciled or simulated costs. Legacy records remain unverified.",11,MUTED));
-        Button export=bigButton("EXPORT TRADE DIAGNOSTICS (JSON)",PANEL2);
-        export.setOnClickListener(new View.OnClickListener(){public void onClick(View v){exportDiagnostics();}});
-        head.addView(export);
         head.addView(text((int) sum[0] + "W / " + (int) sum[1] + "L    net "
                 + String.format("%.4f", sum[2]) + " USDT", 14,
                 sum[2] >= 0 ? 0xFF3EE7AB : 0xFFFF8A90));
@@ -1246,14 +1635,14 @@ public class MainActivity extends Activity {
             return;
         }
         for (int i = 0; i < rows.size(); i++) {
-            final Journal.Trade t = rows.get(i);
+            Journal.Trade t = rows.get(i);
             LinearLayout row = card();
-            boolean open = t.closedAt == 0;
+            boolean open = "OPEN".equals(t.status);
             row.addView(text(t.symbol + "  " + t.side + "  " + t.leverage + "x "
                     + (t.marginMode == null ? "" : t.marginMode)
-                    + "   " + t.status, 14, open ? ACCENT : TEXT));
-            if (!open && ("CONFIRMED".equals(t.costState)||"SIMULATED".equals(t.costState))) {
-                row.addView(text("Net P/L " + String.format("%.4f", t.pnl) + " USDT", 15,
+                    + "   " + (open ? "OPEN" : t.status), 14, open ? ACCENT : TEXT));
+            if (!open) {
+                row.addView(text("P/L " + String.format("%.4f", t.pnl) + " USDT", 15,
                         t.pnl >= 0 ? 0xFF3EE7AB : 0xFFFF8A90));
             }
             row.addView(text("entry " + fmt(t.entry)
@@ -1265,18 +1654,6 @@ public class MainActivity extends Activity {
                     + "  ·  " + (t.protection == null ? "—" : t.protection), 11, MUTED));
             row.addView(text("opened " + Journal.when(t.openedAt)
                     + (open ? "" : "   closed " + Journal.when(t.closedAt)), 10, MUTED));
-            row.addView(text("Reason: "+t.closeReason+" | costs: "+t.costState,12,AMBER));
-            row.addView(text("Gross "+fmt(t.grossPnl)+" − fees "+fmt(t.commission)+" + funding "+fmt(t.funding)
-                    +"\nFee assets "+t.feeAssets+"\n"+t.closeDetail,11,MUTED));
-            row.addView(text("Entry order "+t.entryOrderId+" | Exit orders "+t.exitOrderIds
-                    +"\nSL algo "+t.stopOrderId+" / TP algo "+t.targetOrderId,10,MUTED));
-            Button evidence=bigButton("WHY THIS TRADE CLOSED / EVENTS",PANEL2);
-            evidence.setOnClickListener(new View.OnClickListener(){public void onClick(View v){
-                showFullError(t.symbol+" evidence",t.closeReason+"\n"+t.closeDetail+"\n\n"+journal.events(t.id));
-            }});row.addView(evidence);
-            if(t.signalPrice>0)row.addView(text("Signal "+fmt(t.signalPrice)+" | actual entry difference "+fmt(t.entry-t.signalPrice)
-                +" (already included in fill P/L)",10,MUTED));
-            row.addView(chartButton(t.symbol,t.entry,t.sl,t.tp,t.note+" | "+t.closeReason+" | "+t.costState));
             content.addView(row);
         }
     }
@@ -1289,7 +1666,7 @@ public class MainActivity extends Activity {
      * decision.
      */
     private void renderLearn() {
-        LearningEngine.Review r = LearningEngine.review(journal, env, Readiness.key(cfg,strategy));
+        LearningEngine.Review r = LearningEngine.review(journal, env);
 
         LinearLayout head = card();
         head.addView(text("Falcon learning review", 16, TEXT));
@@ -1307,8 +1684,9 @@ public class MainActivity extends Activity {
             LinearLayout note = card();
             note.addView(text("Not enough trades to draw conclusions", 14, AMBER));
             note.addView(text("There are " + r.reviewed + " completed trades. Below "
-                    + LearningEngine.MINIMUM_CONFIDENT_SAMPLE + ", no exploratory changes are proposed. "
-                    + "Meeting this count alone does not establish a profitable edge.",
+                    + LearningEngine.MINIMUM_CONFIDENT_SAMPLE + ", the difference between a "
+                    + "real edge and luck cannot be told apart, so no changes are proposed. "
+                    + "The figures above are still real — they are just not yet evidence.",
                     11, MUTED));
             content.addView(note);
             return;
@@ -1362,7 +1740,6 @@ public class MainActivity extends Activity {
     }
 
     private void confirmLearning(final LearningEngine.Suggestion s) {
-        if(!"PAPER".equals(env)){showFullError("Research only","Test changes in PAPER/replay first");return;}
         new AlertDialog.Builder(this)
                 .setTitle(s.title)
                 .setMessage(s.evidence + "\n\nApply this change to " + env + "?")
@@ -1417,34 +1794,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Allow exact integer leverage only in the zero-money PAPER simulator. */
-    private void choosePaperLeverage() {
-        if (!"PAPER".equals(env) || !cfg.isFutures()) return;
-        final EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_NUMBER);
-        input.setSingleLine(true);
-        input.setText(String.valueOf(cfg.leverage));
-        input.setSelectAllOnFocus(true);
-        input.setTextColor(TEXT);
-        new AlertDialog.Builder(this)
-            .setTitle("PAPER leverage · 1x–150x")
-            .setMessage("Simulated trades only. Changing leverage affects virtual outcomes, not any exchange account.")
-            .setView(input)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Save", new DialogInterface.OnClickListener() {
-                public void onClick(DialogInterface d, int which) {
-                    int chosen;
-                    try { chosen = Integer.parseInt(input.getText().toString().trim()); }
-                    catch (Exception e) { toast("Enter a whole number from 1 to 150"); return; }
-                    if (chosen < 1 || chosen > 150) { toast("Choose 1x–150x"); return; }
-                    cfg.leverage = chosen;
-                    cfg.save(MainActivity.this);
-                    lastRows.clear();
-                    show("MARKET");
-                }
-            }).show();
-    }
-
     private void renderMarket() {
         content.addView(text("Market type for " + env, 13, ACCENT));
         content.addView(choiceRow(Settings.TRADING_MODES, cfg.tradingMode,
@@ -1460,32 +1809,21 @@ public class MainActivity extends Activity {
             content.addView(text("Spot is buy-only: no leverage and no shorting. "
                     + "Switch to Futures to enable shorts and leverage.", 12, MUTED));
         } else {
-            content.addView(text("Leverage (" + cfg.leverage + "x)", 13, ACCENT));
-            if ("PAPER".equals(env)) {
-                Button choose = bigButton("SELECT SIMULATED LEVERAGE · " + cfg.leverage + "x", 0xFF1D3554);
-                choose.setOnClickListener(new View.OnClickListener() {
-                    public void onClick(View v) { choosePaperLeverage(); }
-                });
-                content.addView(choose);
-                content.addView(text("PAPER only: choose any whole-number leverage from 1x to 150x. "
-                        + "Virtual balances only; this does not enable exchange orders.", 11, MUTED));
-            } else {
-                content.addView(text("DEMO testnet leverage stays within its existing limits; "
-                        + "LIVE new entries remain disabled.", 11, MUTED));
-                List<String> rungs = new ArrayList<String>();
-                for (int i = 0; i < Settings.LEVERAGE_LADDER.length; i++) {
-                    int r = Settings.LEVERAGE_LADDER[i];
-                    if (r <= Settings.maxLeverage(env)) rungs.add(r + "x");
-                }
-                content.addView(choiceRow(rungs.toArray(new String[rungs.size()]),
-                        cfg.leverage + "x", new OnChoice() {
-                            public void pick(String v) {
-                                cfg.leverage = Integer.parseInt(v.replace("x", ""));
-                                cfg.save(MainActivity.this);
-                                show("MARKET");
-                            }
-                        }));
+            content.addView(text("Leverage (max " + Settings.maxLeverage(env)
+                    + "x for " + env + ")", 13, ACCENT));
+            List<String> rungs = new ArrayList<String>();
+            for (int i = 0; i < Settings.LEVERAGE_LADDER.length; i++) {
+                int r = Settings.LEVERAGE_LADDER[i];
+                if (r <= Settings.maxLeverage(env)) rungs.add(r + "x");
             }
+            content.addView(choiceRow(rungs.toArray(new String[rungs.size()]),
+                    cfg.leverage + "x", new OnChoice() {
+                        public void pick(String v) {
+                            cfg.leverage = Integer.parseInt(v.replace("x", ""));
+                            cfg.save(MainActivity.this);
+                            show("MARKET");
+                        }
+                    }));
 
             content.addView(text("Margin mode", 13, ACCENT));
             content.addView(choiceRow(Settings.MARGIN_MODES, cfg.marginMode, new OnChoice() {
@@ -1496,6 +1834,14 @@ public class MainActivity extends Activity {
                 }
             }));
 
+            content.addView(toggle("Reverse Trade Direction", cfg.reverseEntries, new OnToggle() {
+                public void set(boolean on) {
+                    cfg.reverseEntries = on;
+                    cfg.save(MainActivity.this);
+                    lastRows.clear();
+                    show("MARKET");
+                }
+            }));
             content.addView(text("Direction permissions", 13, ACCENT));
             content.addView(toggle("Allow LONG entries", cfg.allowLong, new OnToggle() {
                 public void set(boolean on) {
@@ -1516,22 +1862,6 @@ public class MainActivity extends Activity {
                     + String.format("%.1f", 100.0 / cfg.leverage) + "% adverse move.", 12, AMBER));
         }
 
-        content.addView(text("Reverse Trade Direction (experimental)", 13, ACCENT));
-        content.addView(toggle("Reverse Trade Direction — LONG to SHORT / SHORT to LONG",
-                cfg.reverseTradeDirection, new OnToggle() {
-                    public void set(boolean on) {
-                        cfg.reverseTradeDirection = on;
-                        cfg.save(MainActivity.this);
-                        lastRows.clear(); // old signals must never be entered with changed settings
-                        show("MARKET");
-                    }
-                }));
-        content.addView(text("OFF by default. Applies ONLY to newly finalized FUTURES entries "
-                + "in " + env + "; swaps the EXACT existing SL and TP prices "
-                + "(old SL becomes TP; old TP becomes SL). Effective risk/reward "
-                + "changes. SPOT entries are blocked while "
-                + "reverse is enabled. Does not reverse exits or existing positions. "
-                + "This may increase losses; test in PAPER first.", 11, AMBER));
         content.addView(text("Timeframe", 13, ACCENT));
         content.addView(choiceRow(Settings.TIMEFRAMES, cfg.timeframe, new OnChoice() {
             public void pick(String v) {
@@ -1562,7 +1892,29 @@ public class MainActivity extends Activity {
             }
         }));
 
-        content.addView(text("DEMO testnet entries use risk limits and exchange-stop checks. LIVE new entries are blocked. No automatic phone-stop fallback.",12,AMBER));
+        if (!"PAPER".equals(env)) {
+            content.addView(text("Stop-loss handling", 13, ACCENT));
+            content.addView(toggle("Let Falcon hold the stop if Binance refuses one",
+                    cfg.managedStop, new OnToggle() {
+                        public void set(boolean on) {
+                            if (!on) {
+                                cfg.managedStop = false;
+                                cfg.save(MainActivity.this);
+                                show("MARKET");
+                                return;
+                            }
+                            confirmManagedStop();
+                        }
+                    }));
+            content.addView(text(cfg.managedStop
+                    ? "ON — Falcon closes the position itself at the stop level. It can only "
+                      + "do that while the app is running with a network connection. If the "
+                      + "phone is off or the app is killed, nothing protects the trade."
+                    : "OFF — a position that cannot get a real exchange stop is closed "
+                      + "immediately. Safest, but nothing will trade while Binance refuses "
+                      + "stop orders for your key.", 11, cfg.managedStop ? AMBER : MUTED));
+        }
+
         content.addView(toggle("Auto-open " + env + " trades on READY signals (no tap)",
                 cfg.autoTrade, new OnToggle() {
             public void set(boolean on) {
@@ -1598,7 +1950,7 @@ public class MainActivity extends Activity {
                 }));
 
         content.addView(text("Exits", 13, ACCENT));
-        content.addView(toggle("LEGACY paper experiment: suppress momentum closes", cfg.exitOnlyBySlTp,
+        content.addView(toggle("Only SL and TP close positions", cfg.exitOnlyBySlTp,
                 new OnToggle() {
                     public void set(boolean on) {
                         cfg.exitOnlyBySlTp = on;
@@ -1606,11 +1958,38 @@ public class MainActivity extends Activity {
                         show("MARKET");
                     }
                 }));
-        content.addView(text("Exit variants run in PAPER/replay. DEMO and LIVE use exchange brackets and protection/risk safety closures. An unknown protection status is never treated as success.",11,MUTED));
+        content.addView(text(cfg.exitOnlyBySlTp
+                ? "ON — a position runs until its stop or target is hit. Falcon still raises "
+                  + "the stop to secure profit, so an exit always happens through an order "
+                  + "resting on Binance."
+                : "OFF — Falcon may also close a position early when momentum fades or it "
+                  + "gives back most of its gain. That cuts losers sooner but turns some "
+                  + "recoverable trades into certain small losses.", 11,
+                cfg.exitOnlyBySlTp ? MUTED : AMBER));
+
+        content.addView(toggle("Falcon never closes a position", cfg.neverCloseByFalcon,
+                new OnToggle() {
+                    public void set(boolean on) {
+                        if (!on) {
+                            cfg.neverCloseByFalcon = false;
+                            cfg.save(MainActivity.this);
+                            show("MARKET");
+                            return;
+                        }
+                        confirmNeverClose();
+                    }
+                }));
+        content.addView(text(cfg.neverCloseByFalcon
+                ? "ON — no close order is ever sent by Falcon. On this account Binance "
+                  + "refuses exchange stops, so positions currently run with NO stop at all. "
+                  + "Only you can close them."
+                : "OFF — if Binance will not hold the stop, Falcon closes at your level "
+                  + "instead. That is the only protection available while -4120 persists.",
+                11, cfg.neverCloseByFalcon ? 0xFFFF8A90 : MUTED));
 
         content.addView(text("Safety controls", 13, ACCENT));
-        content.addView(text("Additional daily USDT cap: "
-                + (cfg.maxDailyLoss <= 0 ? "percentage limit applies" : String.format("%.0f USDT", cfg.maxDailyLoss)),
+        content.addView(text("Daily loss limit: "
+                + (cfg.maxDailyLoss <= 0 ? "off" : String.format("%.0f USDT", cfg.maxDailyLoss)),
                 12, MUTED));
         content.addView(slider((int) cfg.maxDailyLoss, 200, new OnSlide() {
             public void set(int v) {
@@ -1629,7 +2008,8 @@ public class MainActivity extends Activity {
                 show("MARKET");
             }
         }));
-        content.addView(text("Daily loss percentage is always enforced; USDT cap and consecutive-loss cap are additional limits. UTC reset. Gap losses can exceed estimates.", 11, MUTED));
+        content.addView(text("Both off by default. A losing run is where an automated "
+                + "system does the most damage.", 11, MUTED));
 
         content.addView(text("Notifications", 13, ACCENT));
         content.addView(toggle("Notify when a position opens", cfg.notifyOpen, new OnToggle() {
@@ -1647,17 +2027,6 @@ public class MainActivity extends Activity {
         content.addView(text("Errors are never notified — they are recorded in the ERRORS tab.",
                 11, MUTED));
 
-        content.addView(text("Maximum planned loss per trade: "+cfg.riskPercent+"% of equity",13,ACCENT));
-        content.addView(choiceRow(new String[]{"0.25","0.5","1.0","2.0"},String.valueOf(cfg.riskPercent),new OnChoice(){public void pick(String x){cfg.riskPercent=Double.parseDouble(x);cfg.save(MainActivity.this);show("MARKET");}}));
-        content.addView(text("Daily loss budget: "+cfg.dailyLossPercent+"% (UTC)",13,ACCENT));
-        content.addView(choiceRow(new String[]{"1.0","2.0","3.0","5.0"},String.valueOf(cfg.dailyLossPercent),new OnChoice(){public void pick(String x){cfg.dailyLossPercent=Double.parseDouble(x);cfg.save(MainActivity.this);show("MARKET");}}));
-        content.addView(text("Cost assumptions per side: "+cfg.feeBps+" bps fee / "+cfg.slippageBps+" bps slippage",12,MUTED));
-        content.addView(choiceRow(new String[]{"5.0","7.5","10.0"},String.valueOf(cfg.feeBps),new OnChoice(){public void pick(String x){cfg.feeBps=Double.parseDouble(x);cfg.save(MainActivity.this);show("MARKET");}}));
-        content.addView(choiceRow(new String[]{"2.0","5.0","10.0"},String.valueOf(cfg.slippageBps),new OnChoice(){public void pick(String x){cfg.slippageBps=Double.parseDouble(x);cfg.save(MainActivity.this);show("MARKET");}}));
-        content.addView(text("Research variants: select before a PAPER/DEMO session; no claim of improvement",13,ACCENT));
-        content.addView(choiceRow(new String[]{"BASELINE","PULLBACK"},cfg.entryPolicy,new OnChoice(){public void pick(String x){cfg.entryPolicy=x;cfg.save(MainActivity.this);show("MARKET");}}));
-        content.addView(choiceRow(new String[]{"LEGACY","FIXED","EARLY","TRAIL"},cfg.exitPolicy,new OnChoice(){public void pick(String x){cfg.exitPolicy=x;cfg.save(MainActivity.this);show("MARKET");}}));
-        content.addView(text("PULLBACK tests closed 1h/4h trend with a 15m EMA21 pullback. LEGACY retains old exit logic for comparison. FIXED/EARLY/TRAIL are separate experiments.",11,MUTED));
         renderBackgroundSection();
     }
 
@@ -1693,7 +2062,9 @@ public class MainActivity extends Activity {
                 show("MARKET");
             }
         }));
-        content.addView(text("Fast scanning increases API load and battery use. Respect exchange throttling; cached scan prices never authorise a stale entry.", 11, MUTED));
+        content.addView(text("5s is the floor and the default. A 5s cycle over 12 symbols "
+                + "uses about 5% of Binance's rate limit, so the constraint is battery and "
+                + "mobile data, not the exchange. Expect heavy drain at 5s.", 11, MUTED));
 
         if (!"PAPER".equals(env)) {
             content.addView(toggle("Allow unattended orders while minimised",
@@ -1708,7 +2079,8 @@ public class MainActivity extends Activity {
                         }
                     }));
             content.addView(text("Off: the background scanner only alerts you, and you decide. "
-                    + "On: DEMO testnet can place fake-fund orders while minimised when Auto-open is also enabled. LIVE entries stay blocked.", 11, AMBER));
+                    + "On: it can place " + env + " orders with nobody watching. LIVE also "
+                    + "requires arming in the ACCOUNT tab.", 11, AMBER));
         }
 
         content.addView(text("If scanning stops on its own, exclude Falcon from battery "
@@ -1726,7 +2098,12 @@ public class MainActivity extends Activity {
         }
         double margin = free * (cfg.sizePercent / 100.0);
         double notional = margin * cfg.notionalMultiplier();
-        String line=String.format("Margin ceiling %.2f USDT; notional ceiling %.2f. Actual size is reduced to keep planned stop loss within %.2f%% of equity and remaining daily risk.",margin,notional,cfg.riskPercent);
+        String line = String.format("%.2f free × %d%% = %.2f margin × %dx = %.2f USDT position",
+                free, cfg.sizePercent, margin, cfg.leverage, notional);
+        if (notional < 5.5 && !"PAPER".equals(env)) {
+            return text(line + "  —  below Binance's ~5 USDT minimum, this order would be "
+                    + "rejected. Raise the percent or the leverage.", 11, AMBER);
+        }
         return text(line, 11, MUTED);
     }
 
@@ -1802,6 +2179,45 @@ public class MainActivity extends Activity {
      * offer the one protection that does work here - a stop Falcon enforces
      * itself - and make its weakness explicit so the choice is informed.
      */
+    private void offerManagedStop(final Engine.Row row) {
+        String detail = "Binance rejected every stop-order type Falcon knows for this account "
+                + "(-4120), so it cannot leave a stop sitting on the exchange.\n\n"
+                + "Falcon can hold the stop itself instead: it watches the price every "
+                + ScanService.intervalSeconds(this) + "s and closes the position at your stop "
+                + "level.\n\n"
+                + "The difference matters: an exchange stop fires even if this phone is off. "
+                + "A Falcon-held stop only fires while the app is running with a connection.";
+        if (!ScanService.isEnabled(this)) {
+            detail += "\n\nBackground scanning is currently OFF — turn it on, or the stop stops "
+                    + "working the moment you leave the app.";
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Exchange stop not possible")
+                .setMessage(detail)
+                .setNeutralButton("Test again", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        testStopOrders();
+                    }
+                })
+                .setNegativeButton("Don't trade", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        refresh();
+                    }
+                })
+                .setPositiveButton("Use Falcon stop", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        cfg.managedStop = true;
+                        cfg.save(MainActivity.this);
+                        if (!ScanService.isEnabled(MainActivity.this)) {
+                            ScanService.setEnabled(MainActivity.this, true);
+                            requestNotificationPermission();
+                        }
+                        toast("Falcon-held stop enabled — opening " + row.symbol);
+                        sendExchangeOrder(row);
+                    }
+                }).show();
+    }
+
     private String styleExplanation(String style) {
         if ("SCALPING".equals(style)) {
             return "Only setups already moving hard: momentum 80+, volume 1.6x, target "
@@ -1817,6 +2233,56 @@ public class MainActivity extends Activity {
         }
         return "No momentum filter. Takes any setup the strategy score approves, including "
                 + "ones that may sit for hours.";
+    }
+
+    private void confirmNeverClose() {
+        new AlertDialog.Builder(this)
+                .setTitle("Falcon never closes — confirm")
+                .setMessage("Falcon will not send a close order for any reason.\n\n"
+                        + "On an account where Binance accepts stop orders this is fine: the "
+                        + "stop sits on the exchange and fires without Falcon.\n\n"
+                        + "This account returns -4120, so Binance is NOT holding your stops. "
+                        + "With this on, a position has no stop anywhere. At 10x leverage an "
+                        + "adverse move can take the whole balance before you see it.\n\n"
+                        + "Turn this on only if you will watch and close positions yourself.")
+                .setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        show("MARKET");
+                    }
+                })
+                .setPositiveButton("I will close them myself",
+                        new DialogInterface.OnClickListener() {
+                            public void onClick(DialogInterface d, int w) {
+                                cfg.neverCloseByFalcon = true;
+                                cfg.save(MainActivity.this);
+                                show("MARKET");
+                            }
+                        }).show();
+    }
+
+    private void confirmManagedStop() {
+        new AlertDialog.Builder(this)
+                .setTitle("Falcon-held stop?")
+                .setMessage("An exchange stop sits on Binance's servers and fires even if this "
+                        + "phone is off. A Falcon-held stop only fires while the app is running "
+                        + "with network.\n\nIf the app is killed, the phone dies or signal drops, "
+                        + "the position has no protection at all.\n\nKeep background scanning on "
+                        + "and the phone charged if you enable this.")
+                .setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        show("MARKET");
+                    }
+                })
+                .setPositiveButton("I accept the risk", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        cfg.managedStop = true;
+                        cfg.save(MainActivity.this);
+                        if (!ScanService.isEnabled(MainActivity.this)) {
+                            toast("Turn on background scanning so the stop works when minimised");
+                        }
+                        show("MARKET");
+                    }
+                }).show();
     }
 
     private void confirmBackgroundTrading() {
@@ -2033,17 +2499,19 @@ public class MainActivity extends Activity {
 
         content.addView(text("DEMO".equals(env)
                 ? "DEMO uses Binance testnet (fake funds). Create testnet keys at "
-                + "DEMO Futures credentials from Binance Demo Trading. SPOT is PAPER-only in this build."
+                + "testnet.binance.vision for spot, or testnet.binancefuture.com for futures."
                 : "LIVE uses your real Binance account and real money.", 12,
                 "LIVE".equals(env) ? AMBER : MUTED));
 
         final EditText k = new EditText(this);
-        k.setHint("New API key (not displayed after saving)");
+        k.setHint("API key");
+        k.setText(Trader.key(this, env));
         style(k);
         content.addView(k);
 
         final EditText s = new EditText(this);
-        s.setHint("New API secret (not displayed after saving)");
+        s.setHint("API secret");
+        s.setText(Trader.secret(this, env));
         style(s);
         s.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         content.addView(s);
@@ -2051,39 +2519,15 @@ public class MainActivity extends Activity {
         Button save = bigButton("SAVE KEYS", 0xFF1D3554);
         save.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                try {
-                    Trader.saveKeys(MainActivity.this, env,
-                            k.getText().toString(), s.getText().toString());
-                    k.setText("");
-                    s.setText("");
-                    toast("Keys stored in Android Keystore protection");
-                    loadExchange();
-                    show("ACCOUNT");
-                } catch (RuntimeException error) {
-                    toast("Could not securely store credentials: " + error.getMessage());
-                }
+                Trader.saveKeys(MainActivity.this, env,
+                        k.getText().toString(), s.getText().toString());
+                toast("Keys saved — loading account…");
+                // No second step: read the account straight away.
+                loadExchange();
+                show("ACCOUNT");
             }
         });
         content.addView(save);
-        content.addView(text("API credentials are stored encrypted. Enter both fields to replace them; "
-                + "clearing requires the CLEAR KEYS button.", 11, MUTED));
-        Button clearKeys = bigButton("CLEAR KEYS", PANEL2);
-        clearKeys.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                new AlertDialog.Builder(MainActivity.this)
-                    .setTitle("Remove saved credentials?")
-                    .setMessage("This removes this environment's API keys from the phone. "
-                        + "Existing exchange positions will NOT be closed or cancelled.")
-                    .setNegativeButton("CANCEL", null)
-                    .setPositiveButton("REMOVE", new DialogInterface.OnClickListener() {
-                        public void onClick(DialogInterface dialog, int which) {
-                            SecureKeys.clear(MainActivity.this, env);
-                            show("ACCOUNT");
-                        }
-                    }).show();
-            }
-        });
-        content.addView(clearKeys);
 
         Button test = bigButton("TEST CONNECTION", PANEL2);
         test.setOnClickListener(new View.OnClickListener() {
@@ -2093,7 +2537,7 @@ public class MainActivity extends Activity {
         });
         content.addView(test);
 
-        Button stopTest = bigButton("INSPECT STOP ORDERS", PANEL2);
+        Button stopTest = bigButton("TEST STOP ORDERS", PANEL2);
         stopTest.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 testStopOrders();
@@ -2117,13 +2561,51 @@ public class MainActivity extends Activity {
         }
 
         if ("LIVE".equals(env)) {
-            content.addView(text("LIVE entry safety lock", 13, ACCENT));
-            content.addView(text(Readiness.liveOrderStatus(Trader.liveArmed(this)), 12, AMBER));
-            content.addView(text("New real-money entries are unavailable in this safety preview. "
-                    + "Open positions and existing orders still require attention; protective management remains available.", 11, MUTED));
+            content.addView(text("Live order sending", 13, ACCENT));
+            content.addView(text("While this is off, LIVE scans and tracks positions locally but "
+                    + "sends nothing to the exchange. Prove your setup on DEMO first: this order "
+                    + "path has not been tested against a real account.", 12, AMBER));
+            content.addView(toggle("Arm LIVE order sending", Trader.liveArmed(this),
+                    new OnToggle() {
+                        public void set(boolean on) {
+                            if (!on) {
+                                Trader.setLiveArmed(MainActivity.this, false);
+                                show("ACCOUNT");
+                                return;
+                            }
+                            confirmArmLive();
+                        }
+                    }));
             content.addView(text("Use an API key with trading permission only. Never enable "
                     + "withdrawals on a key you put in any app.", 11, MUTED));
         }
+    }
+
+    private void confirmArmLive() {
+        final EditText confirm = new EditText(this);
+        confirm.setHint("Type LIVE to confirm");
+        style(confirm);
+        new AlertDialog.Builder(this)
+                .setTitle("Arm real-money trading?")
+                .setMessage("Falcon will place real orders on your Binance account. "
+                        + "This path is untested against a live account. Type LIVE to confirm.")
+                .setView(confirm)
+                .setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        show("ACCOUNT");
+                    }
+                })
+                .setPositiveButton("Arm", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        if ("LIVE".equals(confirm.getText().toString().trim().toUpperCase())) {
+                            Trader.setLiveArmed(MainActivity.this, true);
+                            toast("LIVE order sending armed");
+                        } else {
+                            toast("Not armed - confirmation did not match");
+                        }
+                        show("ACCOUNT");
+                    }
+                }).show();
     }
 
     private String diagnosticReport = null;
@@ -2136,65 +2618,64 @@ public class MainActivity extends Activity {
      * accepted becomes the shape used for every future stop.
      */
     private void testStopOrders() {
-        final Settings snapshot=Settings.load(this,env);
-        pool.execute(new Runnable(){public void run(){
-            String out;
-            try {
-                Trader t=Trader.forReading(MainActivity.this,snapshot);
-                if(t==null) out="Save keys for the selected environment first";
-                else {
-                    StringBuilder b=new StringBuilder("Read-only inspection. No probe orders sent.\n");
-                    for(Trader.Position p:t.positions()) b.append(p.symbol).append(' ').append(p.side).append("\n")
-                        .append(t.openAlgoOrders(p.symbol).toString(2)).append("\n");
-                    out=b.toString();
+        final Settings snapshot = cfg;
+        if (!Trader.hasKeys(this, snapshot.env)) {
+            toast("Save API keys first");
+            return;
+        }
+        diagnosticReport = "Testing every stop-order variant against Binance…";
+        show("ACCOUNT");
+        pool.execute(new Runnable() {
+            public void run() {
+                String out;
+                try {
+                    Trader t = Trader.forEnvironment(MainActivity.this, snapshot);
+                    if (t == null) {
+                        out = "LIVE must be armed in this tab before a real order can be tested.";
+                    } else {
+                        String symbol = "BTCUSDT";
+                        double mark = t.markPrice(symbol);
+                        if (mark <= 0) mark = 60000;
+                        Trader.ProtectionReport r = t.findWorkingProtection(
+                                symbol, true, mark * 0.5, 0.002);
+                        StringBuilder sb = new StringBuilder();
+                        sb.append("Tested on ").append(symbol)
+                          .append(" with a trigger far below the market.\n\n");
+                        sb.append(r.log);
+                        if (r.anyWorked()) {
+                            sb.append("RESULT: protection works using \"")
+                              .append(Trader.VARIANT_NAMES[r.workingIndex])
+                              .append("\".\nFalcon will use this shape from now on, and live "
+                                      + "trading is available again.");
+                        } else {
+                            sb.append("RESULT: none accepted yet.\n\n"
+                                    + "Read the codes above rather than the wording:\n"
+                                    + "  -1102 / -1104  a field is missing or misnamed — the "
+                                    + "endpoint works and the account is fine, the payload is "
+                                    + "wrong. Send me this text and I will correct it.\n"
+                                    + "  -4120          that shape was retired on that endpoint.\n"
+                                    + "  -2015 / 401    a key or permission problem.\n"
+                                    + "  404 HTML       that endpoint does not exist for this "
+                                    + "account type.\n\n"
+                                    + "Meanwhile you can still trade using the Falcon-held stop "
+                                    + "in MARKET.");
+                        }
+                        out = sb.toString();
+                    }
+                } catch (Exception e) {
+                    out = "Test failed: " + e.getMessage();
                 }
-            }catch(Exception e){out="UNKNOWN: "+e.getMessage();}
-            final String result=out;ui.post(new Runnable(){public void run(){diagnosticReport=result;show("ACCOUNT");showFullError("Protection evidence",result);}});
-        }});
+                final String result = out;
+                ui.post(new Runnable() {
+                    public void run() {
+                        diagnosticReport = result;
+                        show("ACCOUNT");
+                        showFullError("Stop order test", result);
+                    }
+                });
+            }
+        });
     }
-    private boolean hasTrackedPositions() {
-        for(String e:new String[]{"PAPER","DEMO","LIVE"}) for(Journal.Trade t:journal.history(e,10000)) if(t.closedAt==0 && !"ENTRY_REJECTED".equals(t.status))return true;
-        return false;
-    }
-    private Button chartButton(final String symbol,final double entry,final double stop,final double target,final String analysis) {
-        Button b=bigButton("CHART / ENTRY / SL / TP",PANEL2);
-        final String timeframe=cfg.timeframe;
-        final boolean chartFutures=cfg.isFutures();
-        b.setOnClickListener(new View.OnClickListener(){public void onClick(View v){
-            pool.execute(new Runnable(){public void run(){
-                try{
-                    final Binance.Candles candles=Binance.klines(symbol,timeframe,120,chartFutures);
-                    ui.post(new Runnable(){public void run(){
-                        LinearLayout box=new LinearLayout(MainActivity.this);box.setOrientation(LinearLayout.VERTICAL);
-                        TradeChart chart=new TradeChart(MainActivity.this,candles,entry,stop,target);
-                        box.addView(chart,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(310)));
-                        TextView detail=text("Current "+timeframe+" closed candles with stored trade levels | "+analysis,12,MUTED);detail.setPadding(dp(12),dp(8),dp(12),dp(12));box.addView(detail);
-                        new AlertDialog.Builder(MainActivity.this).setTitle(symbol+" trade plan").setView(box).setPositiveButton("Close",null).show();
-                    }});
-                }catch(final Exception e){ui.post(new Runnable(){public void run(){toast("Chart unavailable: "+e.getMessage());}});}
-            }});
-        }});return b;
-    }
-    private String pendingExport;
-    private void exportDiagnostics() {
-        try {
-            pendingExport=journal.exportEvidence(env);
-            android.content.Intent i=new android.content.Intent(android.content.Intent.ACTION_CREATE_DOCUMENT);
-            i.addCategory(android.content.Intent.CATEGORY_OPENABLE);i.setType("application/json");
-            i.putExtra(android.content.Intent.EXTRA_TITLE,"Falcon-"+env+"-diagnostics.json");startActivityForResult(i,1041);
-        }catch(Exception e){showFullError("Export failed",e.toString());}
-    }
-    @Override protected void onActivityResult(int request,int result,android.content.Intent data) {
-        super.onActivityResult(request,result,data);
-        if(request!=1041||result!=RESULT_OK||data==null||pendingExport==null)return;
-        try {
-            java.io.OutputStream out=getContentResolver().openOutputStream(data.getData());
-            if(out==null)throw new java.io.IOException("No output stream");
-            try{out.write(pendingExport.getBytes("UTF-8"));}finally{out.close();}
-            pendingExport=null;toast("Diagnostics exported");
-        }catch(Exception e){showFullError("Export failed",e.toString());}
-    }
-
     /** Last order failure, kept verbatim so it can be read and copied. */
     private String lastOrderError = null;
 
@@ -2266,10 +2747,10 @@ public class MainActivity extends Activity {
                     if (!Trader.hasKeys(MainActivity.this, snapshot.env)) {
                         msg = "No API key saved for " + snapshot.env;
                     } else {
-                        // Use management-only client to inspect even with LIVE entries blocked.
-                        Trader t = Trader.forManagement(MainActivity.this, snapshot);
+                        // Build directly so an unarmed LIVE key can still be verified.
+                        Trader t = Trader.forEnvironment(MainActivity.this, snapshot);
                         if (t == null && "LIVE".equals(snapshot.env)) {
-                            msg = "LIVE keys available only for inspection and management.";
+                            msg = "Keys saved. Arm LIVE to enable order sending.";
                         } else if (t == null) {
                             msg = "Could not build client for " + snapshot.env;
                         } else {
@@ -2291,10 +2772,74 @@ public class MainActivity extends Activity {
         });
     }
 
+    // ------------------------------------------------------------------- PC
+
+    private void renderPc() {
+        String saved = prefs().getString(KEY_URL, "");
+        if (saved == null || saved.length() == 0) {
+            webView.setVisibility(View.GONE);
+            content.setVisibility(View.VISIBLE);
+            content.addView(text("Connect to the Falcon desktop app using the phone link "
+                    + "in the desktop sidebar.", 12, MUTED));
+            final EditText in = new EditText(this);
+            in.setHint("http://192.168.1.20:8765/m/your-token");
+            style(in);
+            content.addView(in);
+            Button go = bigButton("CONNECT", 0xFF1D3554);
+            go.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    String u = in.getText().toString().trim();
+                    if (u.length() == 0) {
+                        toast("Enter the address first");
+                        return;
+                    }
+                    if (!u.startsWith("http")) u = "http://" + u;
+                    prefs().edit().putString(KEY_URL, u).apply();
+                    show("PC");
+                }
+            });
+            content.addView(go);
+            return;
+        }
+        content.setVisibility(View.GONE);
+        webView.setVisibility(View.VISIBLE);
+        webView.loadUrl(saved);
+        Button forget = bigButton("CHANGE PC ADDRESS", PANEL);
+        forget.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                prefs().edit().remove(KEY_URL).apply();
+                show("PC");
+            }
+        });
+        content.addView(forget);
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private void configureWebView() {
+        WebSettings s = webView.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setUseWideViewPort(true);
+        s.setLoadWithOverviewMode(true);
+        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        webView.setBackgroundColor(BG);
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                return false;
+            }
+
+            @Override
+            public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
+                if (r != null && !r.isForMainFrame()) return;
+                statusLine.setText("Cannot reach PC. Check Wi-Fi and the desktop app.");
+            }
+        });
+    }
+
     @Override
     protected void onStop() {
         super.onStop();
-        if(protectionTask!=null)ui.removeCallbacks(protectionTask);
         // An Activity's timers are frozen once it leaves the foreground, so
         // in-app scanning cannot continue here. If background scanning is
         // enabled, hand the work to the foreground service; otherwise stop
@@ -2303,7 +2848,7 @@ public class MainActivity extends Activity {
         // timers freeze in the background, so the service carries the work;
         // autoScan is left true so it resumes the moment we come back.
         boolean scanningOn = prefs().getBoolean(KEY_AUTOSCAN, false);
-        if ((scanningOn || hasTrackedPositions()) && ScanService.isEnabled(this)) {
+        if (scanningOn && ScanService.isEnabled(this)) {
             requestNotificationPermission();
             ScanService.start(this);
         } else {
@@ -2318,14 +2863,6 @@ public class MainActivity extends Activity {
         // service stops. Running both doubled the Binance requests and left
         // a notification up while the app was open.
         ScanService.stop(this);
-        if(protectionTask==null) protectionTask=new Runnable(){public void run(){
-            if(!protectionBusy) {
-                protectionBusy=true; final String monitorEnv=env;
-                pool.execute(new Runnable(){public void run(){try{ProtectionMonitor.runAll(MainActivity.this);}finally{protectionBusy=false;}}});
-            }
-            ui.postDelayed(protectionTask,15000);
-        }};
-        ui.removeCallbacks(protectionTask);ui.post(protectionTask);
         if (prefs().getBoolean(KEY_AUTOSCAN, false) && !autoScan) startAutoScan();
     }
 
@@ -2334,13 +2871,16 @@ public class MainActivity extends Activity {
         super.onDestroy();
         if (scanTask != null) ui.removeCallbacks(scanTask);
         if (tickTask != null) ui.removeCallbacks(tickTask);
-        if (protectionTask != null) ui.removeCallbacks(protectionTask);
         if (pool != null) pool.shutdownNow();
     }
 
     @Override
     public boolean onKeyDown(int code, KeyEvent e) {
         if (code == KeyEvent.KEYCODE_BACK) {
+            if ("PC".equals(tab) && webView.getVisibility() == View.VISIBLE && webView.canGoBack()) {
+                webView.goBack();
+                return true;
+            }
             if (!"SCAN".equals(tab)) {
                 show("SCAN");
                 return true;
@@ -2505,7 +3045,6 @@ public class MainActivity extends Activity {
      * like a broken one. Cheap coins need more places, not fewer.
      */
     private String fmt(double v) {
-        if(Double.isNaN(v)||Double.isInfinite(v))return "unknown";
         double m = Math.abs(v);
         if (m >= 1000) return String.format("%.2f", v);
         if (m >= 1) return String.format("%.4f", v);

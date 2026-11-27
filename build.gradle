@@ -11,8 +11,8 @@ android {
         applicationId 'com.falcon.quantum'
         minSdk 24
         targetSdk 34
-        versionCode 11003
-        versionName '11.0.3-paper-leverage-safety-preview'
+        versionCode 10401
+        versionName '10.4.0-reverse'
     }
     sourceSets {
         main {
@@ -27,7 +27,7 @@ android {
     }
     buildTypes {
         debug {
-            applicationIdSuffix '.audit'
+            applicationIdSuffix '.reverse'
             versionNameSuffix '-debug'
         }
         release {

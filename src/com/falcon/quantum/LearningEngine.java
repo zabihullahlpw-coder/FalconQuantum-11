@@ -53,8 +53,8 @@ public final class LearningEngine {
             if (reviewed == 0) return "No completed trades yet.";
             return String.format(Locale.US,
                     "Last %d trades: %d wins, %d losses, %.1f%% win rate, "
-                            + "profit factor %s, net P/L %.4f. Same settings only; observations are not validation.",
-                    reviewed, wins, losses, winRate, Double.isNaN(profitFactor)?"undefined":String.format(Locale.US,"%.2f",profitFactor), netPnl);
+                            + "profit factor %.2f, net P/L %.4f.",
+                    reviewed, wins, losses, winRate, profitFactor, netPnl);
         }
     }
 
@@ -93,21 +93,20 @@ public final class LearningEngine {
         }
 
         double factor() {
-            if (grossLoss <= 0) return Double.NaN;
+            if (grossLoss <= 0) return grossWin > 0 ? 99 : 0;
             return grossWin / grossLoss;
         }
     }
 
     /** Analyse the most recent completed trades for an environment. */
-    public static Review review(Journal journal, String env, String strategyKey) {
+    public static Review review(Journal journal, String env) {
         Review r = new Review();
         List<Journal.Trade> all = journal.history(env, 400);
 
         List<Journal.Trade> closed = new ArrayList<Journal.Trade>();
         for (int i = 0; i < all.size() && closed.size() < REVIEW_SIZE; i++) {
             Journal.Trade t = all.get(i);
-            if (t.closedAt>0 && strategyKey.equals(t.strategyKey) && (t.closeDetail==null||!t.closeDetail.contains("GAP"))
-                    && ("CONFIRMED".equals(t.costState)||"SIMULATED".equals(t.costState))) closed.add(t);
+            if (!"OPEN".equals(t.status)) closed.add(t);
         }
         r.reviewed = closed.size();
         if (r.reviewed == 0) return r;
@@ -126,8 +125,8 @@ public final class LearningEngine {
             else shorts.add(t.pnl, minutes);
             if (minutes <= 30) quick.add(t.pnl, minutes);
             else slow.add(t.pnl, minutes);
-            if (("STOP".equals(t.closeReason)||"EXCHANGE_STOP".equals(t.closeReason))) stopped.add(t.pnl, minutes);
-            else if (("TARGET".equals(t.closeReason)||"EXCHANGE_TARGET".equals(t.closeReason))) targeted.add(t.pnl, minutes);
+            if ("STOP".equals(t.status)) stopped.add(t.pnl, minutes);
+            else if ("TARGET".equals(t.status)) targeted.add(t.pnl, minutes);
             else managed.add(t.pnl, minutes);
         }
 
@@ -263,7 +262,6 @@ public final class LearningEngine {
      * Returns a description of what changed.
      */
     public static String apply(Context ctx, Settings cfg, Suggestion s) {
-        if(!"PAPER".equals(cfg.env))return "Research suggestions are PAPER only";
         if (s.settingKey == null || s.settingKey.length() == 0) {
             markApplied(ctx, s.id);
             return "Noted — no setting needed changing.";

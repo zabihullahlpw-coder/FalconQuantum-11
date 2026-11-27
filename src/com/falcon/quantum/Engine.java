@@ -16,17 +16,10 @@ public final class Engine {
     /** One scanned symbol, ready for the UI. */
     public static final class Row {
         public String symbol;
-        public long signalCloseTime;
-        public Binance.Candles candles;
-        public String entryPolicy="BASELINE";
-        public String settingsKey="";
         public double price;
         public double longScore, shortScore;
         public String side = "LONG";
-        /** Original strategy decision, before optional entry-direction inversion. */
-        public String signalSide;
-        /** Set once when the finalized plan was inverted; prevents accidental double inversion. */
-        public boolean directionReversed;
+        public boolean reversed;
         public String status = "WAIT";
         public double score;
         public boolean ready;
@@ -44,6 +37,29 @@ public final class Engine {
         /** Plain-language support and cautions. */
         public java.util.List<String> reasons = new java.util.ArrayList<String>();
         public java.util.List<String> warnings = new java.util.ArrayList<String>();
+    }
+
+    static Row analyseEntry(String symbol, Binance.Candles candles, double volume,
+                            Strategy strategy, Settings cfg) {
+        boolean reverse = cfg.isFutures() && cfg.reverseEntries;
+        Row row = analyse(symbol, candles, volume, strategy, reverse || cfg.allowShort,
+                cfg.tradingStyle, cfg.timeframe, cfg.requireConfirmation);
+        if (row != null && reverse) reverseEntry(row);
+        return row;
+    }
+
+    static void reverseEntry(Row row) {
+        row.side = "LONG".equals(row.side) ? "SHORT" : "LONG";
+        double originalStop = row.stop;
+        row.stop = row.target;
+        row.target = originalStop;
+        row.riskReward = Math.abs((row.target - row.entry) / (row.stop - row.entry));
+        row.reversed = true;
+    }
+
+    static boolean directionCurrent(Row row, Settings cfg) {
+        return row.reversed == (cfg.isFutures() && cfg.reverseEntries)
+                && ("LONG".equals(row.side) ? cfg.allowLong : cfg.allowShort);
     }
 
     private Engine() {
@@ -65,7 +81,6 @@ public final class Engine {
                               boolean requireConfirmation) {
         if (c == null || c.size < 60) return null;
 
-        strategy = strategy.copy();
         int n = c.size;
         double price = c.close[n - 1];
         double ema9 = Indicators.ema(c.close, 9);
@@ -80,7 +95,7 @@ public final class Engine {
         double recentLow = Indicators.lowest(c.low, 20, 1);
 
         Row r = new Row();
-        r.symbol = symbol; r.signalCloseTime=c.closeTime[n-1]; r.candles=c;
+        r.symbol = symbol;
         r.price = price;
         r.atrPct = atrPct;
 

@@ -2,13 +2,12 @@ package com.falcon.quantum;
 
 /** Settings fingerprints and honest status text; LIVE permission is an operator preference. */
 public final class Readiness {
-    public static final String MODEL_VERSION="11.0.3-paper-leverage-safety-preview";
+    public static final String MODEL_VERSION="11.0.4-reverse";
     private Readiness() {}
     private static String n(double value){return String.format(java.util.Locale.US,"%.4f",value);}
     public static String liveOrderStatus(boolean enabled) {
-        return "Safety preview: new LIVE entries are disabled, regardless of saved settings. "
-            + "Existing LIVE positions can still be inspected and managed. "
-            + "No profitability or real-exchange reliability has been established.";
+        return enabled ? "LIVE trading is enabled. Auto-open can place real-money orders."
+                : "LIVE trading is off. Existing positions can still be managed.";
     }
     public static String key(Settings s,Strategy st) {
         StringBuilder b=new StringBuilder(MODEL_VERSION+"|"+s.tradingMode+"|"+s.timeframe+"|"+s.entryPolicy+"|"+s.exitPolicy

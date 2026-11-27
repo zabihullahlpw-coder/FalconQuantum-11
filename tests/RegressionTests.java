@@ -80,7 +80,7 @@ public final class RegressionTests {
   String savedKey=Readiness.key(cfg,keyStrategy);cfg.save(ctx);keyStrategy.save(ctx);
   ok(savedKey.equals(Readiness.key(Settings.load(ctx,"PAPER"),Strategy.load(ctx))),"preference float storage preserves settings fingerprint");
   ok(!Trader.liveArmed(ctx),"LIVE default remains off");
-  Trader.setLiveArmed(ctx,true);ok(!Trader.liveArmed(ctx),"LIVE cannot be re-armed in safety preview");
+  Trader.setLiveArmed(ctx,true);ok(Trader.liveArmed(ctx),"explicit permission enables LIVE");
   Trader.setLiveArmed(ctx,false);ok(!Trader.liveArmed(ctx),"unchecked LIVE preference persists");
   JSONArray base=new JSONArray().put(fill(1,9,"SELL",1,90,-10,.05,90000))
    .put(fill(2,10,"BUY",1,100,0,.05,100000)).put(fill(3,11,"SELL",1,100.05,.05,.05,200000));

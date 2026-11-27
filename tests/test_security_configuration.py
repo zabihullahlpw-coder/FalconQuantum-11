@@ -25,12 +25,8 @@ class SecuritySettingsTests(unittest.TestCase):
         for needle in ['AndroidKeyStore', 'AES/GCM/NoPadding', 'updateAAD', 'purgeLegacy', '.commit()']:
             self.assertIn(needle, code)
 
-    def test_live_entries_inexorably_disabled(self):
-        code = (root/'src/com/falcon/quantum/Trader.java').read_text()
-        self.assertIn('LIVE entries disabled in Falcon 11.0 safety preview', code)
-        self.assertRegex(code, r'public static boolean liveArmed\(Context ctx\) \{\s*return false;')
+    def test_retired_pc_features_absent(self):
         ui = (root/'src/com/falcon/quantum/MainActivity.java').read_text()
-        self.assertNotIn('Enable LIVE order sending (real funds)', ui)
         self.assertNotIn('"PC"', ui)
         self.assertNotIn('WebView', ui)
         self.assertNotIn('renderPc', ui)

@@ -139,8 +139,8 @@ def main():
               "bytes": apk.stat().st_size, "application_id": package, "version": version,
               "version_code": int(code), "min_sdk": int(minimum), "target_sdk": int(target),
               "build_tools": setting("buildToolsVersion"), "source_files": len(sources),
-              "live_entries_supported": False, "live_entries_default_enabled": False,
-              "live_entries_require_operator_opt_in": False, "device_tested": False,
+              "live_entries_supported": True, "live_entries_default_enabled": False,
+              "live_entries_require_operator_opt_in": True, "device_tested": False,
               "build_method": "Android SDK aapt2 + JDK javac + D8 + zipalign + apksigner"}
     (out / "build-report.json").write_text(json.dumps(report, indent=2) + "\n")
     (out / "SHA256.txt").write_text(report["sha256"] + "  " + apk.name + "\n")

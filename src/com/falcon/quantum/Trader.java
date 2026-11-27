@@ -111,15 +111,14 @@ public final class Trader {
         return pair[0].length() > 0 && pair[1].length() > 0;
     }
 
-    /** Safety preview: previous arming preferences cannot enable new real-money entries. */
     public static boolean liveArmed(Context ctx) {
-        return false;
+        return ctx != null && ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getBoolean("live_entry_permission", false);
     }
 
     public static void setLiveArmed(Context ctx, boolean armed) {
-        // Deliberately never persists an ON switch in the safety preview.
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                .remove("live_armed").commit();
+                .putBoolean("live_entry_permission", armed).commit();
     }
 
     /** Shared by manual entries, foreground/background automation and client creation. */
@@ -127,8 +126,8 @@ public final class Trader {
         if (cfg == null || (!"DEMO".equals(cfg.env) && !"LIVE".equals(cfg.env)))
             return "Exchange entries require DEMO or LIVE; PAPER is simulated locally";
         if (!cfg.isFutures()) return "Exchange entries require Futures; SPOT uses PAPER only";
-        if ("LIVE".equals(cfg.env))
-            return "LIVE entries disabled in Falcon 11.0 safety preview";
+        if ("LIVE".equals(cfg.env) && !liveArmed(ctx))
+            return "LIVE entries disabled. Enable Allow LIVE trading in Account.";
         if (!hasKeys(ctx, cfg.env)) return "No " + cfg.env + " trading credentials";
         return null;
     }
@@ -144,8 +143,8 @@ public final class Trader {
             throw new EntryNotSubmittedException("This client cannot open positions");
         if (!futures || (!"DEMO".equals(environment) && !"LIVE".equals(environment)))
             throw new EntryNotSubmittedException("Exchange entries require DEMO or LIVE Futures");
-        if ("LIVE".equals(environment))
-            throw new EntryNotSubmittedException("LIVE entries disabled in Falcon 11.0 safety preview");
+        if ("LIVE".equals(environment) && !liveArmed(appContext))
+            throw new EntryNotSubmittedException("LIVE entries disabled. Enable Allow LIVE trading in Account.");
     }
 
     /**

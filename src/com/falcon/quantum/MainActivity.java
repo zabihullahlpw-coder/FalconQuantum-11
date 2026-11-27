@@ -41,7 +41,7 @@ import java.util.concurrent.Executors;
  * permissions, risk settings, watchlist and ledger.
  *
  * PAPER is simulated locally. DEMO trades Binance testnet with fake funds.
- * This safety-preview build does not open new LIVE positions.
+ * LIVE entries require explicit operator permission.
  */
 public class MainActivity extends Activity {
 
@@ -410,7 +410,7 @@ public class MainActivity extends Activity {
                         r.momentumVeto == null ? MUTED : AMBER));
             }
             row.addView(chartButton(r.symbol,r.entry,r.stop,r.target,r.reason+" | "+r.reasons+" | "+r.warnings));
-            if (r.ready && "LIVE".equals(env)) {
+            if (r.ready && "LIVE".equals(env) && !Trader.liveArmed(this)) {
                 row.addView(text("Research signal only — LIVE entry disabled", 11, AMBER));
             } else if (r.ready) {
                 Button open = bigButton("OPEN " + r.side + " (" + env + ")", 0xFF1D3554);
@@ -596,7 +596,7 @@ public class MainActivity extends Activity {
      * Open qualifying setups without waiting for a tap.
      *
      * PAPER writes to the local ledger. DEMO uses testnet order execution;
-     * LIVE new entries are disabled. Only one DEMO entry is started per
+     * Only one exchange entry is started per
      * scan cycle: firing several at once would race on the same balance and
      * could blow past the position limit. With a 5s cycle the limit still
      * fills within seconds.
@@ -613,8 +613,8 @@ public class MainActivity extends Activity {
             }});return;
         }
 
-        if ("LIVE".equals(env)) {
-            statusLine.setText("LIVE new entries disabled in safety preview.");
+        if ("LIVE".equals(env) && !Trader.liveArmed(this)) {
+            statusLine.setText("Enable Allow LIVE trading in Account.");
             return;
         }
         if (!Trader.hasKeys(this, env)) return;
@@ -643,8 +643,8 @@ public class MainActivity extends Activity {
     }
 
     private void confirmAndOpen(final Engine.Row r) {
-        if ("LIVE".equals(env)) {
-            toast("LIVE new entries are disabled in safety preview");
+        if ("LIVE".equals(env) && !Trader.liveArmed(this)) {
+            toast("Enable Allow LIVE trading in Account");
             return;
         }
         // Auto-open is an explicit standing instruction; asking every time
@@ -658,7 +658,7 @@ public class MainActivity extends Activity {
                 + cfg.describe() + "\n"
                 + "entry " + fmt(r.entry) + "\nstop " + fmt(r.stop) + "\ntarget " + fmt(r.target);
         if ("LIVE".equals(env)) {
-            detail += "\n\nLIVE new entries are blocked in this safety preview.";
+            detail += "\n\nLIVE uses real funds.";
         }
         new AlertDialog.Builder(this)
                 .setTitle("Open " + env + " position")
@@ -682,8 +682,8 @@ public class MainActivity extends Activity {
         }
         // DEMO and LIVE have no local ledger: the exchange is the single
         // source of truth. If the order cannot be sent, nothing is recorded.
-        if ("LIVE".equals(env)) {
-            toast("LIVE new entries are disabled in safety preview");
+        if ("LIVE".equals(env) && !Trader.liveArmed(this)) {
+            toast("Enable Allow LIVE trading in Account");
             return;
         }
         if (!Trader.hasKeys(this, env)) {
@@ -694,7 +694,7 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Send a fake-funds testnet order for DEMO only. Position size is derived
+     * Send an order for the selected exchange environment. Position size is derived
      * from the exchange's own available balance - never from a simulated
      * one - and is refused if the account cannot cover it.
      */
@@ -1471,7 +1471,7 @@ public class MainActivity extends Activity {
                         + "Virtual balances only; this does not enable exchange orders.", 11, MUTED));
             } else {
                 content.addView(text("DEMO testnet leverage stays within its existing limits; "
-                        + "LIVE new entries remain disabled.", 11, MUTED));
+                        + "LIVE leverage is capped at 1x.", 11, MUTED));
                 List<String> rungs = new ArrayList<String>();
                 for (int i = 0; i < Settings.LEVERAGE_LADDER.length; i++) {
                     int r = Settings.LEVERAGE_LADDER[i];
@@ -1562,7 +1562,7 @@ public class MainActivity extends Activity {
             }
         }));
 
-        content.addView(text("DEMO testnet entries use risk limits and exchange-stop checks. LIVE new entries are blocked. No automatic phone-stop fallback.",12,AMBER));
+        content.addView(text("DEMO testnet entries use risk limits and exchange-stop checks. LIVE entries require account permission. No automatic phone-stop fallback.",12,AMBER));
         content.addView(toggle("Auto-open " + env + " trades on READY signals (no tap)",
                 cfg.autoTrade, new OnToggle() {
             public void set(boolean on) {
@@ -1708,7 +1708,7 @@ public class MainActivity extends Activity {
                         }
                     }));
             content.addView(text("Off: the background scanner only alerts you, and you decide. "
-                    + "On: DEMO testnet can place fake-fund orders while minimised when Auto-open is also enabled. LIVE entries stay blocked.", 11, AMBER));
+                    + "On: Falcon can place orders while minimised with Auto-open enabled. LIVE also requires account permission.", 11, AMBER));
         }
 
         content.addView(text("If scanning stops on its own, exclude Falcon from battery "
@@ -2117,10 +2117,13 @@ public class MainActivity extends Activity {
         }
 
         if ("LIVE".equals(env)) {
-            content.addView(text("LIVE entry safety lock", 13, ACCENT));
+            content.addView(toggle("Allow LIVE trading (real funds)", Trader.liveArmed(this), new OnToggle() {
+                public void set(boolean on) {
+                    Trader.setLiveArmed(MainActivity.this, on);
+                    show("ACCOUNT");
+                }
+            }));
             content.addView(text(Readiness.liveOrderStatus(Trader.liveArmed(this)), 12, AMBER));
-            content.addView(text("New real-money entries are unavailable in this safety preview. "
-                    + "Open positions and existing orders still require attention; protective management remains available.", 11, MUTED));
             content.addView(text("Use an API key with trading permission only. Never enable "
                     + "withdrawals on a key you put in any app.", 11, MUTED));
         }
